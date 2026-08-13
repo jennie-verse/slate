@@ -1,0 +1,5 @@
+.DS_Store
+slate-backup-*.json
+slate-*.excalidraw
+*.zip
+node_modules/

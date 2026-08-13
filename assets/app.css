@@ -1,0 +1,734 @@
+/* slate — app chrome.
+ *
+ * Two things make this file different from the other apps:
+ *
+ * 1. The canvas is the page. UI floats on top of it and covers as little as
+ *    possible, so panels are translucent-free but small, and the toolbar moves
+ *    rather than growing.
+ *
+ * 2. --fs scales LABELS only. Touch targets stay at --tap (44px) through all
+ *    six steps, including 6px and 8px — the house rule is that text shrinks and
+ *    buttons do not.
+ *
+ * Token values are fixed by the approved design concepts (section 7). Colours
+ * are not invented here.
+ */
+
+@font-face {
+  font-family: "Lexend";
+  src: url("./fonts/lexend-400.woff2") format("woff2");
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Lexend";
+  src: url("./fonts/lexend-700.woff2") format("woff2");
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+}
+/* The bundled handwriting face. Its internal family name is "Virgil 3 YOFF";
+   see THIRD_PARTY_NOTICES.md. */
+@font-face {
+  font-family: "Virgil 3 YOFF";
+  src: url("./fonts/virgil.woff2") format("woff2");
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+}
+
+:root {
+  --rose: #EFB3C1;
+  --rose-ink: #8A4257;
+  --rose-on: #8A4257;      /* text ON --rose. Differs from --rose-ink in dark. */
+  --rose-tint: #FBE4EA;
+  --bg: #FDF7F8;
+  --card: #FFFFFF;
+  --canvas: #FDFCF9;
+  --text: #4A3A40;
+  --text-2: #8A7780;
+  --text-3: #B0A0A7;
+  --line: #EDE3E6;
+  --ok: #8ECFB4;
+  --warn: #F0C193;
+  --danger: #DE8580;
+
+  --fs: 12px;
+  --fs-input: 16px;
+  --tap: 44px;
+  --gap: 10px;
+  --radius: 10px;
+  --shadow: 0 1px 2px rgba(74, 58, 64, .06);
+  --shadow-raised: 0 6px 22px rgba(74, 58, 64, .14);
+  --keyboard-inset: 0px;
+
+  --safe-t: env(safe-area-inset-top, 0px);
+  --safe-r: env(safe-area-inset-right, 0px);
+  --safe-b: env(safe-area-inset-bottom, 0px);
+  --safe-l: env(safe-area-inset-left, 0px);
+
+  color-scheme: light;
+  color: var(--text);
+  background: var(--bg);
+  font-family: "Lexend", Verdana, "Trebuchet MS", "Segoe UI", Arial, sans-serif;
+  font-size: var(--fs);
+}
+
+:root[data-theme="dark"] {
+  --rose: #C98BA0;
+  --rose-ink: #FBE4EA;
+  --rose-on: #241E22;      /* 5.99:1 on --rose; --rose-ink would be 2.26:1 */
+  --rose-tint: #3A2A30;
+  --bg: #1C171A;
+  --card: #241E22;
+  --canvas: #1C171A;
+  --text: #EDE3E6;
+  --text-2: #B0A0A7;
+  --text-3: #8A7780;
+  --line: #3A3238;
+  --shadow: 0 1px 2px rgba(0, 0, 0, .4);
+  --shadow-raised: 0 8px 26px rgba(0, 0, 0, .5);
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+
+html, body, #app {
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  padding: 0;
+  overflow: hidden;
+}
+
+body {
+  background: var(--bg);
+  overscroll-behavior: none;
+  -webkit-tap-highlight-color: transparent;
+  -webkit-text-size-adjust: 100%;
+}
+
+button, input, textarea, select { font-family: inherit; }
+button, select { font-size: var(--fs); color: inherit; }
+
+/* House rule, no exceptions: an input under 16px makes iOS zoom the page. */
+input, textarea, select { font-size: var(--fs-input); }
+
+button { cursor: pointer; }
+button:disabled { cursor: default; opacity: .38; }
+
+:focus-visible {
+  outline: 3px solid var(--rose);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+::selection { background: rgba(239, 179, 193, .5); color: var(--text); }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: .001ms !important;
+    transition-duration: .001ms !important;
+  }
+}
+
+/* ------------------------------------------------------------------ shell */
+
+.shell {
+  position: fixed;
+  inset: 0;                 /* not 100vh — the iOS address bar changes vh */
+  display: block;
+  overflow: hidden;
+}
+
+.canvas-host {
+  position: absolute;
+  inset: 0;
+  background: var(--canvas);
+  touch-action: none;
+  overscroll-behavior: none;
+}
+
+.layer {
+  position: absolute;
+  inset: 0;
+  display: block;
+  pointer-events: none;
+}
+
+.surface {
+  position: absolute;
+  inset: 0;
+  touch-action: none;
+  overscroll-behavior: none;
+  outline: none;
+}
+
+/* ----------------------------------------------------------------- topbar */
+
+.topbar {
+  position: absolute;
+  top: calc(var(--safe-t) + 8px);
+  left: calc(var(--safe-l) + 8px);
+  right: calc(var(--safe-r) + 8px);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  pointer-events: none;
+  z-index: 3;
+}
+
+.topbar > * { pointer-events: auto; min-width: 0; }
+.topbar-spacer { flex: 1 1 auto; pointer-events: none; min-width: 0; }
+
+.chip {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  min-height: var(--tap);
+  padding: 0 4px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--card);
+  box-shadow: var(--shadow);
+}
+
+.chip-group { padding: 0 2px; }
+
+.icon-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: var(--tap);
+  min-height: var(--tap);
+  padding: 0;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text);
+}
+
+.icon-button:hover:not(:disabled) { background: var(--rose-tint); }
+
+.board-title {
+  flex: 0 1 auto;
+  min-width: 3ch;
+  max-width: 34vw;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  padding: 0 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--card);
+  box-shadow: var(--shadow);
+  min-height: var(--tap);
+  font-weight: 700;
+}
+
+.save-status {
+  flex: 0 0 auto;
+  padding: 0 10px;
+  color: var(--text-2);
+  font-size: var(--fs);
+  white-space: nowrap;
+}
+
+/* State is spelled out, never colour alone. */
+.save-status[data-state="saving"] { color: var(--text-2); }
+.save-status[data-state="dirty"] { color: var(--rose-ink); }
+.save-status[data-state="error"] {
+  color: var(--danger);
+  border-color: var(--danger);
+  font-weight: 700;
+}
+
+.zoom-label {
+  min-width: 52px;
+  min-height: var(--tap);
+  padding: 0 4px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---------------------------------------------------------------- toolbar */
+
+.toolbar {
+  position: absolute;
+  z-index: 3;
+  display: flex;
+  gap: 2px;
+  padding: 4px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: var(--card);
+  box-shadow: var(--shadow-raised);
+  /* Bar layout: bottom of the screen, inside the home indicator. */
+  left: 50%;
+  bottom: calc(var(--safe-b) + 10px + var(--keyboard-inset));
+  transform: translateX(-50%);
+  max-width: calc(100vw - var(--safe-l) - var(--safe-r) - 16px);
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.toolbar::-webkit-scrollbar { display: none; }
+
+.tool {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 1px;
+  flex: 0 0 auto;
+  /* 48px keeps a comfortable margin over the 44px minimum, at every text size. */
+  min-width: 48px;
+  min-height: 48px;
+  padding: 0 2px;
+  border: 1.5px solid transparent;
+  border-radius: 10px;
+  background: transparent;
+  color: var(--text);
+}
+
+.tool-label {
+  font-size: calc(var(--fs) * .78);
+  line-height: 1;
+  color: var(--text-2);
+  max-width: 46px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Three cues, not one: background, border, and aria-pressed. */
+.tool.is-on {
+  background: var(--rose);
+  border-color: var(--rose-ink);
+  color: var(--rose-on);
+}
+
+.tool.is-on .tool-label { color: var(--rose-on); }
+.tool:hover:not(.is-on) { background: var(--rose-tint); }
+
+/* ------------------------------------------------------------------ panel */
+
+.panel {
+  position: absolute;
+  z-index: 2;
+  border: 1px solid var(--line);
+  background: var(--card);
+  box-shadow: var(--shadow-raised);
+  display: flex;
+  flex-direction: column;
+  /* Sheet layout: sits above the bottom toolbar. */
+  left: calc(var(--safe-l) + 8px);
+  right: calc(var(--safe-r) + 8px);
+  bottom: calc(var(--safe-b) + 68px + var(--keyboard-inset));
+  max-height: 42vh;
+  border-radius: 14px;
+}
+
+.panel-body {
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  padding: 10px 12px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.panel-handle {
+  display: none;
+  align-items: center;
+  justify-content: center;
+  min-width: var(--tap);
+  min-height: 32px;
+  border: 0;
+  background: transparent;
+  color: var(--text-2);
+}
+
+.prop-group { display: flex; flex-direction: column; gap: 5px; }
+
+.prop-label {
+  font-size: var(--fs);
+  color: var(--text-2);        /* never --text-3; that is 2.35:1 */
+  font-weight: 700;
+}
+
+.prop-row { display: flex; flex-wrap: wrap; gap: 4px; }
+
+.prop-empty { margin: 0; color: var(--text-2); }
+
+.swatch,
+.opt {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: var(--tap);
+  min-height: var(--tap);
+  padding: 0 6px;
+  border: 1.5px solid var(--line);
+  border-radius: 9px;
+  background: var(--card);
+  color: var(--text);
+  font-size: calc(var(--fs) * .95);
+}
+
+.opt-wide { min-width: 62px; }
+
+.opt.is-on,
+.swatch.is-on {
+  background: var(--rose);
+  border-color: var(--rose-ink);
+  color: var(--rose-on);
+  font-weight: 700;
+}
+
+.opt:hover:not(.is-on):not(:disabled),
+.swatch:hover:not(.is-on) { background: var(--rose-tint); }
+
+.opt.is-danger { color: var(--danger); border-color: var(--danger); }
+.opt.is-danger.is-on { background: var(--danger); color: #fff; }
+
+.swatch-chip {
+  display: block;
+  width: 22px;
+  height: 22px;
+  border-radius: 6px;
+  border: 1px solid rgba(74, 58, 64, .22);
+}
+
+.swatch-chip.is-transparent {
+  background:
+    linear-gradient(45deg, var(--line) 25%, transparent 25%, transparent 75%, var(--line) 75%) 0 0/10px 10px,
+    linear-gradient(45deg, var(--line) 25%, transparent 25%, transparent 75%, var(--line) 75%) 5px 5px/10px 10px,
+    var(--card);
+}
+
+.swatch-custom { position: relative; overflow: hidden; }
+
+.swatch-input {
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+  width: 100%;
+  height: 100%;
+  border: 0;
+  padding: 0;
+  cursor: pointer;
+}
+
+.width-bar {
+  display: block;
+  width: 22px;
+  border-radius: 3px;
+  background: currentColor;
+}
+
+.slider {
+  width: 100%;
+  min-height: var(--tap);
+  accent-color: var(--rose);
+}
+
+/* Narrow screens: the top bar cannot hold everything at 390px without
+   clipping the board name. Pinch is the primary zoom on touch, so the +/- steps
+   drop out first; the percentage stays (tap it to reset) and so does
+   scroll-back-to-content, which is the only way out of a lost viewport. */
+@media (max-width: 560px) {
+  .zoom-step,
+  .zoom-fit { display: none; }
+  .board-title { max-width: 44vw; }
+  .topbar { gap: 4px; }
+}
+
+/* ------------------------------------------------------- rail (iPad wide) */
+
+/* Rail layout swaps ONE class' worth of positioning. There is no second DOM
+   tree, so the tool and its properties survive a rotation unchanged. */
+@media (min-width: 820px) and (orientation: landscape) {
+  .toolbar {
+    left: calc(var(--safe-l) + 10px);
+    bottom: auto;
+    top: 50%;
+    transform: translateY(-50%);
+    flex-direction: column;
+    max-width: none;
+    max-height: calc(100vh - 140px);
+    overflow-x: visible;
+    overflow-y: auto;
+  }
+
+  .panel {
+    left: auto;
+    right: calc(var(--safe-r) + 10px);
+    bottom: auto;
+    top: calc(var(--safe-t) + 64px);
+    width: 250px;
+    max-height: calc(100vh - var(--safe-t) - 96px);
+    border-radius: 14px;
+  }
+
+  .panel-handle { display: flex; align-self: flex-end; }
+  .panel-handle svg { transform: rotate(0deg); }
+
+  .panel-collapsed .panel { width: var(--tap); }
+  .panel-collapsed .panel-body { display: none; }
+  .panel-collapsed .panel-handle svg { transform: rotate(180deg); }
+
+  .board-title { max-width: 26vw; }
+}
+
+/* --------------------------------------------------------- text editor */
+
+.text-editor {
+  position: absolute;
+  z-index: 4;
+  margin: 0;
+  padding: 0 2px;
+  border: 1px dashed var(--rose-ink);
+  border-radius: 3px;
+  background: transparent;
+  outline: none;
+  resize: none;
+  overflow: hidden;
+  white-space: pre;
+  /* Stays at 16px and is scaled with a transform. Setting the real display size
+     here would trip iOS's "focus on a <16px input" auto-zoom whenever the
+     canvas is zoomed out. */
+  font-size: 16px !important;
+  min-width: 2ch;
+}
+
+/* ------------------------------------------------------------- empty hint */
+
+.empty-hint {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  color: var(--text-2);
+  pointer-events: none;
+  text-align: center;
+  padding: 0 20px;
+}
+
+.empty-hint[hidden] { display: none; }
+
+/* ---------------------------------------------------------------- dialogs */
+
+.backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 20;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  padding: 12px;
+  padding-bottom: calc(12px + var(--safe-b) + var(--keyboard-inset));
+  background: rgba(28, 23, 26, .34);
+}
+
+@media (min-width: 700px) {
+  .backdrop { align-items: center; }
+}
+
+.dialog {
+  width: 100%;
+  max-width: 420px;
+  max-height: min(78vh, 640px);
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  background: var(--card);
+  box-shadow: var(--shadow-raised);
+  overflow: hidden;
+}
+
+.dialog-wide { max-width: 540px; }
+
+.dialog-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 8px 8px 16px;
+  border-bottom: 1px solid var(--line);
+}
+
+.dialog-title { margin: 0; font-size: calc(var(--fs) * 1.25); }
+
+.dialog-body {
+  padding: 14px 16px 18px;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.dialog-text { margin: 0; line-height: 1.55; }
+.dialog-note { margin: 0; color: var(--text-2); line-height: 1.5; }
+
+.dialog-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+}
+
+.button {
+  min-height: var(--tap);
+  padding: 0 16px;
+  border: 1.5px solid var(--line);
+  border-radius: 10px;
+  background: var(--card);
+  color: var(--text);
+}
+
+.button:hover { background: var(--rose-tint); }
+
+.button-primary {
+  background: var(--rose);
+  border-color: var(--rose-ink);
+  color: var(--rose-on);
+  font-weight: 700;
+}
+
+.button-danger { background: var(--danger); border-color: var(--danger); color: #fff; }
+
+.field { display: flex; flex-direction: column; gap: 5px; }
+.field-label { color: var(--text-2); font-weight: 700; }
+
+.input {
+  min-height: var(--tap);
+  padding: 0 12px;
+  border: 1.5px solid var(--line);
+  border-radius: 10px;
+  background: var(--card);
+  color: var(--text);
+}
+
+.check-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: var(--tap);
+}
+
+.check-row input {
+  width: 22px;
+  height: 22px;
+  accent-color: var(--rose);
+}
+
+/* menu + board list */
+
+.menu-list { display: flex; flex-direction: column; gap: 2px; }
+
+.menu-item {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 1px;
+  min-height: var(--tap);
+  padding: 8px 12px;
+  border: 0;
+  border-radius: 10px;
+  background: transparent;
+  text-align: left;
+}
+
+.menu-item:hover { background: var(--rose-tint); }
+.menu-item-label { font-weight: 700; }
+.menu-item-desc { color: var(--text-2); font-size: calc(var(--fs) * .92); }
+.menu-danger .menu-item-label { color: var(--danger); }
+
+.board-list { display: flex; flex-direction: column; gap: 4px; }
+
+.board-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  border: 1.5px solid var(--line);
+  border-radius: 10px;
+  padding: 2px;
+}
+
+.board-row.is-current { border-color: var(--rose-ink); background: var(--rose-tint); }
+
+.board-open {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 1px;
+  min-height: var(--tap);
+  padding: 6px 10px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  text-align: left;
+}
+
+.board-name {
+  font-weight: 700;
+  /* Korean and Latin mixed in one line must wrap without clipping. */
+  overflow-wrap: anywhere;
+  word-break: keep-all;
+}
+
+.board-meta { color: var(--text-2); font-size: calc(var(--fs) * .92); }
+.board-delete { color: var(--text-2); }
+.board-delete:hover { color: var(--danger); background: transparent; }
+
+/* ----------------------------------------------------------------- toasts */
+
+.toasts {
+  position: fixed;
+  left: 50%;
+  transform: translateX(-50%);
+  bottom: calc(var(--safe-b) + 128px);
+  z-index: 30;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  align-items: center;
+  pointer-events: none;
+  width: min(94vw, 460px);
+}
+
+.toast {
+  padding: 10px 14px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--card);
+  color: var(--text);
+  box-shadow: var(--shadow-raised);
+  line-height: 1.45;
+  text-align: center;
+  overflow-wrap: anywhere;
+  word-break: keep-all;
+}
+
+.toast-error { border-color: var(--danger); }
+.toast-warn { border-color: var(--warn); }
+.toast.is-leaving { opacity: 0; transition: opacity .2s ease; }
+
+@media (min-width: 820px) and (orientation: landscape) {
+  .toasts { bottom: calc(var(--safe-b) + 24px); }
+}
+
+/* ------------------------------------------------------------ boot error */
+
+.boot-error {
+  padding: 28px;
+  font-family: Verdana, sans-serif;
+  color: var(--text);
+}
