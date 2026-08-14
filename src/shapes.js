@@ -195,9 +195,26 @@ function round(value) {
   return Math.round(value * 100) / 100;
 }
 
-/** Arrowhead geometry in element-local coordinates. */
+/**
+ * Arrowhead geometry in element-local coordinates.
+ *
+ * `_outline` variants share the geometry and only change how it is painted, so
+ * the caller reads `filled` rather than re-deriving the kind. `dot` is the
+ * original's legacy alias for `circle` and is drawn, not rewritten — the stored
+ * value has to survive a round trip (Build_Plan 3-4).
+ */
 export function arrowheadShape(kind, points, atStart, strokeWidth) {
   if (!kind || points.length < 2) return null;
+  const filled = !String(kind).endsWith("_outline");
+  const base = String(kind).replace(/_outline$/, "") === "dot"
+    ? "circle"
+    : String(kind).replace(/_outline$/, "");
+  const geometry = headGeometry(base, points, atStart, strokeWidth);
+  if (!geometry || geometry.kind === "none") return null;
+  return { ...geometry, filled };
+}
+
+function headGeometry(kind, points, atStart, strokeWidth) {
   const [tipX, tipY] = atStart ? points[0] : points[points.length - 1];
   const [fromX, fromY] = atStart ? points[1] : points[points.length - 2];
   const angle = Math.atan2(tipY - fromY, tipX - fromX);
@@ -240,5 +257,5 @@ export function arrowheadShape(kind, points, atStart, strokeWidth) {
     const tailY = tipY - back * 2 * Math.sin(angle);
     return { kind: "polygon", points: [[tipX, tipY], left, [tailX, tailY], right] };
   }
-  return null;
+  return { kind: "none" };
 }

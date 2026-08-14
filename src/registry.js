@@ -14,6 +14,7 @@ import {
 } from "./geometry.js";
 import { drawablesFor, freedrawOutline, outlineToPath2D, arrowheadShape } from "./shapes.js";
 import { displayColor, fontStackFor } from "./model.js";
+import { imageFor, imageState } from "./images.js";
 
 const registry = new Map();
 
@@ -106,6 +107,8 @@ const linearEntry = {
       for (const [kind, atStart] of [[element.startArrowhead, true], [element.endArrowhead, false]]) {
         const shape = arrowheadShape(kind, points, atStart, element.strokeWidth || 1);
         if (!shape) continue;
+        // Outline heads share the geometry and only swap fill for stroke.
+        const paint = () => (shape.filled ? ctx.fill() : ctx.stroke());
         if (shape.kind === "lines") {
           ctx.beginPath();
           for (const [a, b] of shape.lines) {
@@ -116,13 +119,13 @@ const linearEntry = {
         } else if (shape.kind === "circle") {
           ctx.beginPath();
           ctx.arc(shape.cx, shape.cy, shape.r, 0, Math.PI * 2);
-          ctx.fill();
+          paint();
         } else if (shape.kind === "polygon") {
           ctx.beginPath();
           ctx.moveTo(shape.points[0][0], shape.points[0][1]);
           for (let i = 1; i < shape.points.length; i += 1) ctx.lineTo(shape.points[i][0], shape.points[i][1]);
           ctx.closePath();
-          ctx.fill();
+          paint();
         }
       }
     });
@@ -200,6 +203,56 @@ register("text", {
     const box = localBounds(element);
     const next = resizeBox(box, handle, x, y);
     return { x: next.x, y: next.y };
+  },
+});
+
+/* ----------------------------------------------------------------- image */
+
+register("image", {
+  draw: (ctx, element, context) => {
+    withTransform(ctx, element, (target, box) => {
+      const bitmap = imageFor(element.fileId);
+      if (bitmap && box.width > 0 && box.height > 0) {
+        try {
+          target.drawImage(bitmap, 0, 0, box.width, box.height);
+          return;
+        } catch {
+          // A decoded-but-unusable bitmap falls through to the frame below.
+        }
+      }
+      // Never leave a blank hole: an image that is still decoding, missing from
+      // the files map, or broken all show a frame so the element stays findable
+      // and movable rather than becoming an invisible trap.
+      const state = imageState(element.fileId);
+      target.save();
+      target.setLineDash([5, 4]);
+      target.lineWidth = 1.5;
+      target.strokeStyle = context.dark ? "#8A7780" : "#B0A0A7";
+      target.fillStyle = context.dark ? "rgba(138,119,128,.14)" : "rgba(176,160,167,.12)";
+      target.fillRect(0, 0, box.width, box.height);
+      target.strokeRect(0, 0, box.width, box.height);
+      target.setLineDash([]);
+      if (box.width > 80 && box.height > 26) {
+        target.fillStyle = context.dark ? "#B0A0A7" : "#8A7780";
+        target.font = `12px ${fontStackFor(2)}`;
+        target.textAlign = "center";
+        target.textBaseline = "middle";
+        target.fillText(
+          state === "loading" ? "Loading image…" : "Image not available",
+          box.width / 2, box.height / 2,
+        );
+      }
+      target.restore();
+    });
+  },
+  hitTest: hitTestElement,
+  bounds: worldBounds,
+  resize: (element, handle, x, y, options) => {
+    const box = localBounds(element);
+    // Images keep their aspect ratio by default — a stretched photo is almost
+    // never what was wanted. Shift is the escape hatch, same as everywhere else.
+    const next = resizeBox(box, handle, x, y, { keepAspect: !options?.keepAspect });
+    return { x: next.x, y: next.y, width: next.width, height: next.height };
   },
 });
 

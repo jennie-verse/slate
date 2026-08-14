@@ -273,9 +273,15 @@ button:disabled { cursor: default; opacity: .38; }
   max-width: calc(100vw - var(--safe-l) - var(--safe-r) - 16px);
   overflow-x: auto;
   scrollbar-width: none;
+  /* Eleven tools do not fit across a phone. The bar scrolls, and the fade at
+     each end is what says so — a hard clip just looks like a broken toolbar. */
+  -webkit-mask-image: linear-gradient(to right, transparent 0, #000 16px, #000 calc(100% - 16px), transparent 100%);
+  mask-image: linear-gradient(to right, transparent 0, #000 16px, #000 calc(100% - 16px), transparent 100%);
+  scroll-snap-type: x proximity;
 }
 
 .toolbar::-webkit-scrollbar { display: none; }
+.toolbar .tool { scroll-snap-align: center; }
 
 .tool {
   display: inline-flex;
@@ -451,7 +457,38 @@ button:disabled { cursor: default; opacity: .38; }
 
 /* Rail layout swaps ONE class' worth of positioning. There is no second DOM
    tree, so the tool and its properties survive a rotation unchanged. */
-@media (min-width: 820px) and (orientation: landscape) {
+/* Short and wide — an iPhone on its side.
+   The tools stay in the bottom bar (a vertical rail cannot show eleven of them
+   in 390px), but the properties move to the right instead of stacking above the
+   bar. Sheet + bar together would leave about 140px of drawing area. */
+@media (orientation: landscape) and (max-height: 619px) {
+  .panel {
+    left: auto;
+    right: calc(var(--safe-r) + 8px);
+    top: calc(var(--safe-t) + 60px);
+    bottom: calc(var(--safe-b) + 68px + var(--keyboard-inset));
+    width: min(240px, 30vw);
+    max-height: none;
+  }
+
+  .panel-handle { display: flex; align-self: flex-end; }
+  .panel-handle svg { transform: rotate(0deg); }
+  .panel-collapsed .panel { width: var(--tap); }
+  .panel-collapsed .panel-body { display: none; }
+  .panel-collapsed .panel-handle svg { transform: rotate(180deg); }
+
+  /* Centred on the drawing area, not on the screen, so the bar never slides
+     under the properties card — and so all eleven tools still fit across. */
+  .toolbar {
+    left: calc((100vw - min(240px, 30vw) - var(--safe-r)) / 2 + var(--safe-l) / 2);
+    max-width: calc(100vw - var(--safe-l) - var(--safe-r) - min(240px, 30vw) - 24px);
+  }
+  .empty-hint { display: none; }
+}
+
+/* An iPhone in landscape is 844x390 — wide enough for the old query, far too
+   short for eleven tools stacked vertically. The rail needs iPad HEIGHT too. */
+@media (min-width: 820px) and (min-height: 620px) and (orientation: landscape) {
   .toolbar {
     left: calc(var(--safe-l) + 10px);
     bottom: auto;
@@ -462,6 +499,10 @@ button:disabled { cursor: default; opacity: .38; }
     max-height: calc(100vh - 140px);
     overflow-x: visible;
     overflow-y: auto;
+    /* Vertical rail: no horizontal fade, nothing to snap. */
+    -webkit-mask-image: none;
+    mask-image: none;
+    scroll-snap-type: none;
   }
 
   .panel {
@@ -688,6 +729,91 @@ button:disabled { cursor: default; opacity: .38; }
 .board-delete { color: var(--text-2); }
 .board-delete:hover { color: var(--danger); background: transparent; }
 
+/* --------------------------------------------------------------- library */
+
+.library-list { display: flex; flex-direction: column; gap: 4px; }
+
+.library-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  border: 1.5px solid var(--line);
+  border-radius: 10px;
+  padding: 2px;
+}
+
+.library-insert {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 1px;
+  min-height: var(--tap);
+  padding: 6px 10px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  text-align: left;
+}
+
+.library-name {
+  font-weight: 700;
+  overflow-wrap: anywhere;
+  word-break: keep-all;
+}
+
+.library-meta { color: var(--text-2); font-size: calc(var(--fs) * .92); }
+
+/* ---------------------------------------------------------- context menu */
+
+.menu-layer {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+}
+
+.context-menu {
+  position: fixed;
+  max-width: min(84vw, 300px);
+  /* A long list scrolls rather than running off the bottom of an iPhone. */
+  max-height: min(70vh, 520px);
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  padding: 6px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--card);
+  box-shadow: var(--shadow-raised);
+}
+
+.context-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  width: 100%;
+  /* House rule: 44px stays 44px at every one of the six text sizes. */
+  min-height: var(--tap);
+  padding: 8px 12px;
+  border: 0;
+  border-radius: 9px;
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+}
+
+.context-item:hover:not(:disabled) { background: var(--rose-tint); }
+.context-item:disabled { color: var(--text-3); }
+.context-item.is-danger .context-label { color: var(--danger); }
+.context-label { overflow-wrap: anywhere; word-break: keep-all; }
+.context-hint { color: var(--text-3); font-size: calc(var(--fs) * .92); white-space: nowrap; }
+
+.context-separator {
+  height: 1px;
+  margin: 4px 6px;
+  background: var(--line);
+}
+
 /* ----------------------------------------------------------------- toasts */
 
 .toasts {
@@ -721,7 +847,7 @@ button:disabled { cursor: default; opacity: .38; }
 .toast-warn { border-color: var(--warn); }
 .toast.is-leaving { opacity: 0; transition: opacity .2s ease; }
 
-@media (min-width: 820px) and (orientation: landscape) {
+@media (min-width: 820px) and (min-height: 620px) and (orientation: landscape) {
   .toasts { bottom: calc(var(--safe-b) + 24px); }
 }
 

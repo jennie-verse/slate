@@ -6,6 +6,7 @@ import { rectangleTool, diamondTool, ellipseTool } from "./shape.js";
 import { arrowTool, lineTool } from "./linear.js";
 import { freedrawTool } from "./freedraw.js";
 import { textTool } from "./text.js";
+import { imageTool } from "./image.js";
 import { eraserTool } from "./eraser.js";
 
 export const TOOLS = [
@@ -18,6 +19,7 @@ export const TOOLS = [
   lineTool,
   freedrawTool,
   textTool,
+  imageTool,
   eraserTool,
 ];
 
@@ -33,6 +35,7 @@ export const NUMBER_SHORTCUTS = {
   6: "line",
   7: "freedraw",
   8: "text",
+  9: "image",
   0: "eraser",
 };
 

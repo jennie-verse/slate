@@ -6,27 +6,46 @@
 // so adding a tool in stage 3 (lasso, laser, frame) is one object, and the
 // property panel needs no change because it reads propsSchema
 // (Expansion_Plan 2-5).
+//
+// Stage 2 adds three things to the drag path, all of which have to survive undo
+// as ONE step with the move that caused them:
+//   * bound arrows re-seat themselves as their shapes move (binding.js);
+//   * labels inside shapes are relaid out (containers.js);
+//   * grid and object snapping pull the drag onto round numbers (snapping.js).
 
 import {
   localBounds, boundsOfMany, handleAt, elementsInBox, rotatePoint, scalePoints, resizeBox,
+  worldBounds,
 } from "../geometry.js";
 import { entryFor } from "../registry.js";
 import { Actions } from "../actions.js";
+import { expandSelection, outerGroupId } from "../arrange.js";
+import { objectSnap, snapCandidates } from "../snapping.js";
+
+const DRAG_KEYS = ["x", "y", "width", "height", "angle", "points"];
 
 function selectedElements(app) {
   return [...app.selection].map((id) => app.scene.get(id)).filter((e) => e && !e.isDeleted);
 }
 
 function selectionBoxOf(app) {
-  const elements = selectedElements(app);
+  const elements = selectedElements(app).filter((element) => !element.containerId);
   if (!elements.length) return null;
   if (elements.length === 1 && elements[0].angle) return localBounds(elements[0]);
   return boundsOfMany(elements);
 }
 
 function selectionAngleOf(app) {
-  const elements = selectedElements(app);
+  const elements = selectedElements(app).filter((element) => !element.containerId);
   return elements.length === 1 ? (elements[0].angle || 0) : 0;
+}
+
+function snapshot(element) {
+  const out = {};
+  for (const key of DRAG_KEYS) {
+    if (element && key in element) out[key] = clone(element[key]);
+  }
+  return out;
 }
 
 export const selectTool = {
@@ -55,33 +74,53 @@ export const selectTool = {
           origin: { x: event.x, y: event.y },
           before: elements.map((element) => ({ ...element })),
           ids: elements.map((element) => element.id),
+          extraIds: app.bindingCompanions(elements.map((element) => element.id)),
         };
-        app.setDragging(this.state.ids);
+        this.state.extraBefore = this.state.extraIds.map((id) => snapshot(app.scene.get(id)));
+        app.setDragging([...this.state.ids, ...this.state.extraIds]);
         return;
       }
     }
 
-    // 2. Topmost element under the pointer.
+    // 2. Topmost element under the pointer. A tap on a link badge opens it
+    //    instead of starting a drag.
+    if (app.linkBadgeAtPoint(event.x, event.y)) {
+      const target = app.linkBadgeAtPoint(event.x, event.y);
+      this.state = { mode: "link", target };
+      return;
+    }
+
     const hit = app.elementAt(event.x, event.y, threshold);
     if (hit) {
       const additive = event.shiftKey;
+      // Clicking any member of a group takes the whole group, unless the group
+      // is already the selection and the user is drilling in with a shift-tap.
+      const grouped = expandSelection(app.scene, [hit.id]);
       if (additive) {
         const next = new Set(app.selection);
-        if (next.has(hit.id)) next.delete(hit.id); else next.add(hit.id);
+        const alreadyIn = next.has(hit.id);
+        for (const id of grouped) {
+          if (alreadyIn) next.delete(id); else next.add(id);
+        }
         app.setSelection(next);
       } else if (!app.selection.has(hit.id)) {
-        app.setSelection(new Set([hit.id]));
+        app.setSelection(grouped);
       }
       const elements = selectedElements(app);
       if (!elements.length) return;
+      const ids = elements.map((element) => element.id);
       this.state = {
         mode: "move",
         origin: { x: event.x, y: event.y },
         before: elements.map((element) => ({ ...element })),
-        ids: elements.map((element) => element.id),
+        ids,
+        extraIds: app.bindingCompanions(ids),
         moved: false,
+        startBox: boundsOfMany(elements.filter((element) => !element.containerId)),
+        candidates: null,
       };
-      app.setDragging(this.state.ids);
+      this.state.extraBefore = this.state.extraIds.map((id) => snapshot(app.scene.get(id)));
+      app.setDragging([...ids, ...this.state.extraIds]);
       return;
     }
 
@@ -92,7 +131,7 @@ export const selectTool = {
 
   onPointerMove(app, event) {
     const state = this.state;
-    if (!state) return;
+    if (!state || state.mode === "link") return;
 
     if (state.mode === "marquee") {
       const box = {
@@ -102,19 +141,26 @@ export const selectTool = {
         height: Math.abs(event.y - state.origin.y),
       };
       app.setSelectionBox(box);
-      const inside = elementsInBox(app.scene.visible(), box);
+      const inside = elementsInBox(app.scene.visible(), box).filter((element) => !element.containerId);
       const next = new Set(state.base);
-      for (const element of inside) next.add(element.id);
+      for (const id of expandSelection(app.scene, inside.map((element) => element.id))) next.add(id);
       app.setSelection(next, { quiet: true });
       return;
     }
 
     if (state.mode === "move") {
-      const dx = event.x - state.origin.x;
-      const dy = event.y - state.origin.y;
+      let dx = event.x - state.origin.x;
+      let dy = event.y - state.origin.y;
       if (dx || dy) state.moved = true;
+
+      const snap = this.resolveSnap(app, state, dx, dy, event);
+      dx = snap.dx;
+      dy = snap.dy;
+      app.setSnapGuides(snap.guides);
+
       const changes = state.before.map((element) => ({ x: element.x + dx, y: element.y + dy }));
       app.history.runSilent(Actions.update(state.ids, changes));
+      app.syncBindings(state.ids, { silent: true });
       app.requestRender();
       return;
     }
@@ -142,6 +188,7 @@ export const selectTool = {
         return patch;
       });
       app.history.runSilent(Actions.update(state.ids, changes));
+      app.syncBindings(state.ids, { silent: true });
       app.requestRender();
       return;
     }
@@ -158,17 +205,56 @@ export const selectTool = {
         return { x: nx, y: ny, angle: (element.angle || 0) + delta };
       });
       app.history.runSilent(Actions.update(state.ids, changes));
+      app.syncBindings(state.ids, { silent: true });
       app.requestRender();
     }
   },
 
-  onPointerUp(app) {
+  /** Grid first, then objects — the grid is explicit, object snap is a guess. */
+  resolveSnap(app, state, dx, dy, event) {
+    if (event.altKey || !state.startBox) return { dx, dy, guides: [] };
+
+    let nextDx = dx;
+    let nextDy = dy;
+    const step = app.gridStep();
+    if (step) {
+      nextDx = Math.round((state.startBox.x + dx) / step) * step - state.startBox.x;
+      nextDy = Math.round((state.startBox.y + dy) / step) * step - state.startBox.y;
+      return { dx: nextDx, dy: nextDy, guides: [] };
+    }
+    if (!app.objectSnapEnabled()) return { dx, dy, guides: [] };
+
+    if (!state.candidates) {
+      state.candidates = snapCandidates(
+        app.scene,
+        new Set([...state.ids, ...state.extraIds]),
+        app.visibleWorldBox(),
+      );
+    }
+    const moving = {
+      x: state.startBox.x + dx,
+      y: state.startBox.y + dy,
+      width: state.startBox.width,
+      height: state.startBox.height,
+    };
+    const result = objectSnap(moving, state.candidates, 6 / app.viewport.zoom);
+    return { dx: dx + result.dx, dy: dy + result.dy, guides: result.guides };
+  },
+
+  onPointerUp(app, event) {
     const state = this.state;
     this.state = null;
     app.setSelectionBox(null);
     app.setDragging(null);
+    app.setSnapGuides(null);
     if (!state) return;
 
+    if (state.mode === "link") {
+      if (app.linkBadgeAtPoint(event?.x ?? 0, event?.y ?? 0)?.id === state.target?.id) {
+        app.openLink(state.target);
+      }
+      return;
+    }
     if (state.mode === "marquee") {
       app.requestRender();
       return;
@@ -179,24 +265,21 @@ export const selectTool = {
       return;
     }
 
+    // Labels get relaid out now rather than on every frame: wrapping measures
+    // text, and doing that per pointermove is the difference between a smooth
+    // drag and a stuttering one.
+    app.syncBindings(state.ids, { silent: true, layout: true });
+
     // The gesture already mutated the scene through apply(); record the inverse
-    // so the whole drag undoes as one step rather than a hundred.
-    const after = state.ids.map((id) => {
-      const element = app.scene.get(id);
-      const keys = ["x", "y", "width", "height", "angle", "points"];
-      const snapshot = {};
-      for (const key of keys) if (element && key in element) snapshot[key] = clone(element[key]);
-      return snapshot;
-    });
-    const before = state.before.map((element) => {
-      const keys = ["x", "y", "width", "height", "angle", "points"];
-      const snapshot = {};
-      for (const key of keys) if (key in element) snapshot[key] = clone(element[key]);
-      return snapshot;
-    });
+    // so the whole drag — including the arrows that followed it — undoes as one
+    // step rather than a hundred.
+    const ids = [...state.ids, ...state.extraIds];
+    const before = [...state.before.map(snapshot), ...state.extraBefore];
+    const after = ids.map((id) => snapshot(app.scene.get(id)));
+
     app.history.record(
-      Actions.update(state.ids, before),
-      Actions.update(state.ids, after),
+      Actions.update(ids, before),
+      Actions.update(ids, after),
     );
     app.markStatic();
     app.requestRender();
@@ -208,11 +291,11 @@ export const selectTool = {
     this.state = null;
     app.setSelectionBox(null);
     app.setDragging(null);
+    app.setSnapGuides(null);
     if (state?.before) {
-      app.history.runSilent(Actions.update(state.ids, state.before.map((element) => ({
-        x: element.x, y: element.y, width: element.width, height: element.height,
-        angle: element.angle, points: clone(element.points),
-      }))));
+      const ids = [...state.ids, ...(state.extraIds || [])];
+      const before = [...state.before.map(snapshot), ...(state.extraBefore || [])];
+      app.history.runSilent(Actions.update(ids, before));
     }
     app.markStatic();
     app.requestRender();
@@ -222,3 +305,5 @@ export const selectTool = {
 function clone(value) {
   return Array.isArray(value) ? value.map((item) => (Array.isArray(item) ? [...item] : item)) : value;
 }
+
+export { outerGroupId, worldBounds };

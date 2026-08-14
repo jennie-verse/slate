@@ -3,12 +3,21 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync, existsSync } from "node:fs";
+import { readFileSync, existsSync, readdirSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const read = (relative) => readFileSync(join(root, relative), "utf8");
+
+function walk(directory, out = []) {
+  for (const entry of readdirSync(join(root, directory), { withFileTypes: true })) {
+    const path = `${directory}/${entry.name}`;
+    if (entry.isDirectory()) walk(path, out);
+    else if (entry.name.endsWith(".js")) out.push(`./${path}`);
+  }
+  return out;
+}
 
 test("service worker VERSION matches APP_BUILD", () => {
   const sw = read("sw.js").match(/const VERSION = "([^"]+)"/)[1];
@@ -24,6 +33,19 @@ test("every precached shell file exists", () => {
     if (url === "./") continue;
     assert.ok(existsSync(join(root, url)), `precached but missing on disk: ${url}`);
   }
+});
+
+test("every source module is precached", () => {
+  // The other direction of the test above, and the one that actually bites:
+  // adding a file and forgetting APP_SHELL leaves the app working online and
+  // broken offline — with no error anywhere (stage 2 kickoff note, 6).
+  const block = read("sw.js").match(/const APP_SHELL = \[([\s\S]*?)\];/)[1];
+  const listed = new Set([...block.matchAll(/"([^"]+)"/g)].map((match) => match[1]));
+  for (const file of walk("src")) {
+    assert.ok(listed.has(file), `${file} exists but is not in APP_SHELL — it will be missing offline`);
+  }
+  assert.ok(listed.has("./vendor/rough.esm.js"));
+  assert.ok(listed.has("./vendor/perfect-freehand.mjs"));
 });
 
 test("optional cache entries that exist are real files", () => {
@@ -128,6 +150,32 @@ test("service worker registration survives a late start()", () => {
   const body = app.match(/registerServiceWorker\(\)\s*\{[\s\S]*?\n  \}/)[0];
   assert.match(body, /document\.readyState === "complete"/, "must register immediately when the page has already loaded");
   assert.match(body, /serviceWorker\.register\("\.\/sw\.js"\)/);
+});
+
+test("a sync that follows history.run() must merge, not stack", () => {
+  // syncBindings() re-seats bound arrows and re-wraps labels AFTER the change
+  // that caused them. Recording that as its own undo entry means one Ctrl+Z
+  // takes back the consequence and leaves the cause — boxes aligned, arrows
+  // where they were. Every non-gesture caller therefore passes merge: true;
+  // gesture callers pass silent: true and record the whole drag themselves.
+  for (const file of ["src/app.js", "src/props.js"]) {
+    const text = read(file);
+    for (const call of text.matchAll(/syncBindings\(([^;]*?)\)\s*;/gs)) {
+      const args = call[1];
+      assert.ok(
+        /silent:\s*true/.test(args) || /merge:\s*true/.test(args),
+        `${file}: syncBindings(${args.trim().slice(0, 70)}) must be silent (mid-gesture) or merge (after a run)`,
+      );
+    }
+  }
+});
+
+test("keyboard nudging moves bound arrows too", () => {
+  // Arrow keys move elements exactly like dragging does. Forgetting to sync
+  // leaves the arrows behind, and nothing about the code looks wrong.
+  const app = read("src/app.js");
+  const block = app.match(/\["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"\][\s\S]*?\n      return;/)[0];
+  assert.match(block, /syncBindings\(/, "the arrow-key handler must sync bindings");
 });
 
 test("live-preview controls record their own undo step", () => {

@@ -11,7 +11,7 @@
 import {
   STROKE_PALETTE, FILL_PALETTE, FILL_STYLES, STROKE_STYLES, STROKE_WIDTH,
   STROKE_WIDTH_LABELS, ROUGHNESS, FONT_SIZES, FONT_CHOICES, ARROWHEADS,
-  ARROW_TYPES, displayColor,
+  ARROWHEAD_LABELS, ARROW_TYPES, displayColor,
 } from "./model.js";
 import { Actions } from "./actions.js";
 
@@ -21,6 +21,7 @@ const SCHEMAS = {
   arrow: ["stroke", "strokeWidth", "strokeStyle", "roughness", "arrowType", "arrowheads", "opacity"],
   freedraw: ["stroke", "strokeWidth", "opacity"],
   text: ["stroke", "fontSize", "fontFamily", "textAlign", "opacity"],
+  image: ["opacity"],
   none: [],
 };
 
@@ -37,6 +38,13 @@ function schemaForSelection(elements) {
     for (const field of SCHEMAS[name] || SCHEMAS.shape) fields.add(field);
   }
   fields.add("layers");
+  // Stage 2 controls. Order matters — the panel reads top to bottom.
+  if (elements.filter((element) => !element.containerId).length > 1) {
+    fields.add("align");
+    fields.add("distribute");
+  }
+  fields.add("flip");
+  fields.add("group");
   fields.add("actions");
   return [...fields];
 }
@@ -131,7 +139,12 @@ export function renderProps(container, app) {
   const commit = (changes) => {
     app.setStyle(changes);
     if (selected.length) {
-      app.history.run(Actions.update(selected.map((element) => element.id), changes));
+      const ids = selected.map((element) => element.id);
+      app.history.run(Actions.update(ids, changes));
+      // A font size change re-wraps a label and can regrow its host, which then
+      // moves the arrows bound to it. Merged into the same undo step so one
+      // Ctrl+Z takes the whole thing back (history.js).
+      app.syncBindings(ids, { layout: true, merge: true });
       app.markStatic();
       app.requestRender();
       app.scheduleSave();
@@ -275,14 +288,14 @@ export function renderProps(container, app) {
         break;
       }
       case "arrowheads": {
-        const labels = { null: "None", arrow: "Arrow", bar: "Bar", circle: "Dot", triangle: "Triangle", diamond: "Diamond" };
         for (const [key, title] of [["startArrowhead", "Arrowhead — start"], ["endArrowhead", "Arrowhead — end"]]) {
           const value = current(key, key === "endArrowhead" ? "arrow" : null);
           const { wrapper, row } = group(title);
           for (const head of ARROWHEADS) {
+            const label = ARROWHEAD_LABELS[String(head)];
             row.appendChild(optionButton({
-              label: labels[String(head)],
-              title: labels[String(head)],
+              label,
+              title: label,
               active: (value ?? null) === head,
               wide: true,
               onSelect: () => commit({ [key]: head }),
@@ -410,21 +423,102 @@ export function renderProps(container, app) {
         container.appendChild(wrapper);
         break;
       }
+      case "align": {
+        const { wrapper, row } = group("Align");
+        const modes = [
+          ["Left", "left"], ["Middle", "centerX"], ["Right", "right"],
+          ["Top", "top"], ["Centre", "centerY"], ["Bottom", "bottom"],
+        ];
+        for (const [label, mode] of modes) {
+          row.appendChild(optionButton({
+            label, title: `Align ${label.toLowerCase()}`, active: false, wide: true,
+            onSelect: () => app.align(mode),
+          }));
+        }
+        container.appendChild(wrapper);
+        break;
+      }
+      case "distribute": {
+        const { wrapper, row } = group("Distribute");
+        row.appendChild(optionButton({
+          label: "Across", title: "Distribute horizontally", active: false, wide: true,
+          onSelect: () => app.distribute("x"),
+        }));
+        row.appendChild(optionButton({
+          label: "Down", title: "Distribute vertically", active: false, wide: true,
+          onSelect: () => app.distribute("y"),
+        }));
+        container.appendChild(wrapper);
+        break;
+      }
+      case "flip": {
+        const { wrapper, row } = group("Flip");
+        row.appendChild(optionButton({
+          label: "Left / right", title: "Flip horizontally", active: false, wide: true,
+          onSelect: () => app.flip("x"),
+        }));
+        row.appendChild(optionButton({
+          label: "Up / down", title: "Flip vertically", active: false, wide: true,
+          onSelect: () => app.flip("y"),
+        }));
+        container.appendChild(wrapper);
+        break;
+      }
+      case "group": {
+        const { wrapper, row } = group("Group");
+        const loose = selected.filter((element) => !element.containerId);
+        const grouped = loose.some((element) => (element.groupIds || []).length);
+        if (loose.length > 1) {
+          row.appendChild(optionButton({
+            label: "Group", title: "Group", active: false, wide: true,
+            onSelect: () => app.groupSelection(),
+          }));
+        }
+        if (grouped) {
+          row.appendChild(optionButton({
+            label: "Ungroup", title: "Ungroup", active: false, wide: true,
+            onSelect: () => app.ungroupSelection(),
+          }));
+        }
+        row.appendChild(optionButton({
+          label: "Lock", title: "Lock", active: false, wide: true,
+          onSelect: () => app.setLocked(true),
+        }));
+        if (row.children.length) container.appendChild(wrapper);
+        break;
+      }
       case "actions": {
         const { wrapper, row } = group("Selected");
         const ids = selected.map((element) => element.id);
+        const loose = selected.filter((element) => !element.containerId);
         row.appendChild(optionButton({
           label: "Duplicate", title: "Duplicate", active: false, wide: true,
           onSelect: () => app.duplicateSelection(),
         }));
+        row.appendChild(optionButton({
+          label: "Copy", title: "Copy", active: false, wide: true,
+          onSelect: () => app.copySelection(),
+        }));
+        row.appendChild(optionButton({
+          label: "Copy style", title: "Copy style", active: false, wide: true,
+          onSelect: () => app.copySelectionStyles(),
+        }));
+        row.appendChild(optionButton({
+          label: "Paste style", title: "Paste style", active: false, wide: true,
+          onSelect: () => app.pasteSelectionStyles(),
+        }));
+        if (loose.length === 1) {
+          row.appendChild(optionButton({
+            label: loose[0].link ? "Edit link" : "Add link",
+            title: "Link", active: !!loose[0].link, wide: true,
+            onSelect: () => app.editLink(),
+          }));
+        }
         const remove = optionButton({
           label: "Delete", title: "Delete", active: false, wide: true,
           onSelect: () => {
-            app.history.run(Actions.delete(ids));
+            app.deleteElements(ids);
             app.setSelection(new Set());
-            app.markStatic();
-            app.requestRender();
-            app.scheduleSave();
           },
         });
         remove.classList.add("is-danger");

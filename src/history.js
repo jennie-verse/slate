@@ -44,6 +44,27 @@ export class History {
     this.redoStack = [];
   }
 
+  /**
+   * Fold a consequence into the step that caused it.
+   *
+   * Aligning a box moves the arrows bound to it; typing a label can grow its
+   * host, which moves those arrows again. Those follow-ups are not separate
+   * things the user did — recording them as their own undo entries means one
+   * Ctrl+Z leaves the drawing halfway: boxes aligned, arrows still where they
+   * were. The caller applies the follow-up with runSilent() and hands the pair
+   * here, so the whole consequence undoes and redoes as one step.
+   *
+   * Undo order is follow-up first, then the cause; redo is the reverse.
+   */
+  mergeIntoLast(undoAction, redoAction) {
+    const entry = this.undoStack[this.undoStack.length - 1];
+    if (!entry || !undoAction) return false;
+    entry.undo = { type: "batch", actions: [undoAction, entry.undo] };
+    entry.redo = { type: "batch", actions: [entry.redo, redoAction] };
+    this.redoStack = [];
+    return true;
+  }
+
   get canUndo() {
     return this.undoStack.length > 0;
   }

@@ -2,7 +2,7 @@
 // Settings shows APP_BUILD, so "what is deployed" and "what is running on this
 // device" can be told apart at a glance. Editing this file without bumping both
 // leaves the old build cached and the fix invisible.
-const VERSION = "2026.08.13-stage1";
+const VERSION = "2026.08.13-stage2";
 const SHELL_CACHE = `slate-shell-${VERSION}`;
 const FONT_CACHE = `slate-font-${VERSION}`;
 
@@ -45,6 +45,16 @@ const APP_SHELL = [
   "./src/tools/freedraw.js",
   "./src/tools/text.js",
   "./src/tools/eraser.js",
+  "./src/binding.js",
+  "./src/containers.js",
+  "./src/arrange.js",
+  "./src/snapping.js",
+  "./src/clipboard.js",
+  "./src/images.js",
+  "./src/library.js",
+  "./src/search.js",
+  "./src/contextmenu.js",
+  "./src/tools/image.js",
   "./icons/icon-192.png",
   "./icons/icon-512.png",
   "./icons/apple-touch-icon.png",

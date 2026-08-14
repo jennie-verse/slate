@@ -55,7 +55,9 @@ export class Renderer {
     this.overlayDirty = true;
   }
 
-  markStaticDirty() { this.staticDirty = true; }
+  // The overlay carries link and lock markers, which are derived from the same
+  // elements the static layer draws — so anything that dirties one dirties both.
+  markStaticDirty() { this.staticDirty = true; this.overlayDirty = true; }
   markOverlayDirty() { this.overlayDirty = true; }
 
   prepare(ctx, viewport) {
@@ -88,6 +90,8 @@ export class Renderer {
     this.prepare(ctx, viewport);
     const visibleBox = viewportBounds(viewport, this.width, this.height);
     const context = { rough: this.rough, dark, zoom: viewport.zoom };
+
+    if (state.grid) this.drawGrid(ctx, viewport, visibleBox, state.grid, dark);
 
     for (const element of scene.visible()) {
       if (element.id === editingId) continue;             // being typed into
@@ -127,8 +131,19 @@ export class Renderer {
       try { entryFor(draft.type).draw(ctx, draft, context); } catch { /* ignore */ }
     }
 
+    if (state.bindingTarget) {
+      this.drawBindingHighlight(ctx, state.bindingTarget, viewport, dark);
+    }
+    if (state.snapGuides?.length) {
+      this.drawSnapGuides(ctx, state.snapGuides, viewport, dark);
+    }
+
     const accent = dark ? "#EFB3C1" : "#8A4257";
-    const selected = [...(selection || [])].map((id) => scene.get(id)).filter((e) => e && !e.isDeleted);
+    // A label inside a shape is selected together with its host; outlining both
+    // just draws a box inside a box.
+    const selected = [...(selection || [])]
+      .map((id) => scene.get(id))
+      .filter((e) => e && !e.isDeleted && !e.containerId);
 
     if (selected.length) {
       ctx.lineWidth = 1 / viewport.zoom;
@@ -167,6 +182,73 @@ export class Renderer {
     ctx.setTransform(1, 0, 0, 1, 0, 0);
   }
 
+  /**
+   * Grid lines, drawn under the elements.
+   * Lines are skipped entirely once they would be closer than 4 screen pixels
+   * apart — at that point a grid is a grey wash, not a guide.
+   */
+  drawGrid(ctx, viewport, box, step, dark) {
+    const spacing = step * viewport.zoom;
+    if (spacing < 4) return;
+    const major = step * 5;
+    const startX = Math.floor(box.x / step) * step;
+    const startY = Math.floor(box.y / step) * step;
+    const thin = dark ? "rgba(237,227,230,.07)" : "rgba(74,58,64,.07)";
+    const thick = dark ? "rgba(237,227,230,.15)" : "rgba(74,58,64,.15)";
+
+    ctx.save();
+    ctx.lineWidth = 1 / viewport.zoom;
+    for (let x = startX; x <= box.x + box.width; x += step) {
+      ctx.strokeStyle = Math.abs(x % major) < 0.001 ? thick : thin;
+      ctx.beginPath();
+      ctx.moveTo(x, box.y);
+      ctx.lineTo(x, box.y + box.height);
+      ctx.stroke();
+    }
+    for (let y = startY; y <= box.y + box.height; y += step) {
+      ctx.strokeStyle = Math.abs(y % major) < 0.001 ? thick : thin;
+      ctx.beginPath();
+      ctx.moveTo(box.x, y);
+      ctx.lineTo(box.x + box.width, y);
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
+
+  /** Dashed outline over the shape an arrow is about to attach to. */
+  drawBindingHighlight(ctx, element, viewport, dark) {
+    const box = worldBounds(element);
+    const pad = 4 / viewport.zoom;
+    ctx.save();
+    ctx.setLineDash([6 / viewport.zoom, 4 / viewport.zoom]);
+    ctx.lineWidth = 2 / viewport.zoom;
+    ctx.strokeStyle = dark ? "#CBE5B4" : "#4E7238";
+    ctx.strokeRect(box.x - pad, box.y - pad, box.width + pad * 2, box.height + pad * 2);
+    ctx.setLineDash([]);
+    ctx.restore();
+  }
+
+  /** Alignment guides while dragging. */
+  drawSnapGuides(ctx, guides, viewport, dark) {
+    ctx.save();
+    ctx.strokeStyle = dark ? "#EFB3C1" : "#8A4257";
+    ctx.lineWidth = 1 / viewport.zoom;
+    ctx.setLineDash([3 / viewport.zoom, 3 / viewport.zoom]);
+    for (const guide of guides) {
+      ctx.beginPath();
+      if (guide.axis === "x") {
+        ctx.moveTo(guide.at, guide.from);
+        ctx.lineTo(guide.at, guide.to);
+      } else {
+        ctx.moveTo(guide.from, guide.at);
+        ctx.lineTo(guide.to, guide.at);
+      }
+      ctx.stroke();
+    }
+    ctx.setLineDash([]);
+    ctx.restore();
+  }
+
   drawHandles(ctx, box, angle, viewport, dark) {
     const size = 9 / viewport.zoom;
     const rotateOffset = 26 / viewport.zoom;
@@ -198,14 +280,64 @@ export class Renderer {
 
   drawOverlay(state) {
     const { ctx } = this.layers.overlay;
-    const { viewport } = state;
+    const { viewport, dark, scene } = state;
     this.prepare(ctx, viewport);
-    // Stage 1 uses the overlay for search highlights only; stage 3's laser and
-    // frame labels and stage 4's remote cursors land here.
+
+    // Search hits. Corners are carried through so rotated text highlights at
+    // the same angle as the letters instead of in a fat axis-aligned box.
     if (state.highlights?.length) {
-      ctx.fillStyle = state.dark ? "rgba(247,227,168,.22)" : "rgba(247,227,168,.55)";
-      for (const box of state.highlights) {
-        ctx.fillRect(box.x, box.y, box.width, box.height);
+      for (const hit of state.highlights) {
+        const active = hit.index === state.activeHighlight;
+        ctx.fillStyle = active
+          ? (dark ? "rgba(247,227,168,.46)" : "rgba(247,227,168,.85)")
+          : (dark ? "rgba(247,227,168,.20)" : "rgba(247,227,168,.45)");
+        const corners = hit.box?.corners;
+        if (corners) {
+          ctx.beginPath();
+          ctx.moveTo(corners[0][0], corners[0][1]);
+          for (let i = 1; i < corners.length; i += 1) ctx.lineTo(corners[i][0], corners[i][1]);
+          ctx.closePath();
+          ctx.fill();
+        } else if (hit.box) {
+          ctx.fillRect(hit.box.x, hit.box.y, hit.box.width, hit.box.height);
+        }
+      }
+    }
+
+    // Link and lock markers. Both are drawn as SHAPES, never colour alone, so
+    // they still read at every text size and in both themes.
+    if (scene && (state.showBadges ?? true)) {
+      const size = 9 / viewport.zoom;
+      for (const element of scene.visible()) {
+        if (element.link) {
+          const box = worldBounds(element);
+          const x = box.x + box.width;
+          const y = box.y;
+          ctx.save();
+          ctx.fillStyle = dark ? "#B9D8EE" : "#3E6C90";
+          ctx.beginPath();
+          ctx.arc(x, y, size, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.strokeStyle = dark ? "#1C171A" : "#FFFFFF";
+          ctx.lineWidth = 1.6 / viewport.zoom;
+          ctx.beginPath();
+          ctx.moveTo(x - size * 0.4, y + size * 0.25);
+          ctx.lineTo(x + size * 0.1, y - size * 0.3);
+          ctx.moveTo(x - size * 0.1, y + size * 0.3);
+          ctx.lineTo(x + size * 0.4, y - size * 0.25);
+          ctx.stroke();
+          ctx.restore();
+        }
+        if (element.locked) {
+          const box = worldBounds(element);
+          ctx.save();
+          ctx.strokeStyle = dark ? "rgba(237,227,230,.35)" : "rgba(74,58,64,.30)";
+          ctx.lineWidth = 1 / viewport.zoom;
+          ctx.setLineDash([2 / viewport.zoom, 4 / viewport.zoom]);
+          ctx.strokeRect(box.x, box.y, box.width, box.height);
+          ctx.setLineDash([]);
+          ctx.restore();
+        }
       }
     }
     ctx.setTransform(1, 0, 0, 1, 0, 0);

@@ -24,6 +24,7 @@ import { boundsOfMany, localBounds } from "./geometry.js";
 import { drawablesFor, freedrawOutline, outlineToSvgPath, arrowheadShape, cornerRadius } from "./shapes.js";
 import { entryFor } from "./registry.js";
 import { readSetting, writeSetting } from "./store.js";
+import { dataUrlFor, ensureImagesReady } from "./images.js";
 
 const generator = rough.generator();
 
@@ -153,6 +154,8 @@ export async function exportPNG(elements, {
 } = {}) {
   const live = elements.filter((element) => !element.isDeleted);
   if (!live.length) throw new Error("Nothing to export — this board is empty.");
+  // A half-decoded image would export as an empty frame with no warning.
+  await ensureImagesReady(live);
 
   const box = exportBounds(live, padding);
   const limit = await canvasAreaLimit();
@@ -342,6 +345,18 @@ function elementSvg(element, dark) {
       return `${open}<text font-family="${escapeXml(fontStackFor(element.fontFamily))}" font-size="${size}" `
         + `fill="${escapeXml(displayColor(element.strokeColor, dark))}" text-anchor="${anchor}" `
         + `xml:space="preserve">${lines}</text></g>`;
+    }
+    case "image": {
+      const box = localBounds(element);
+      const href = dataUrlFor(element.fileId);
+      if (!href) {
+        return `${open}<rect width="${round(box.width)}" height="${round(box.height)}" fill="rgba(176,160,167,.14)" `
+          + `stroke="#B0A0A7" stroke-dasharray="6 5"/></g>`;
+      }
+      // The data URL is embedded, so the SVG stays a single self-contained file
+      // and never asks the network for anything when it is opened.
+      return `${open}<image width="${round(box.width)}" height="${round(box.height)}" `
+        + `preserveAspectRatio="none" href="${escapeXml(href)}"/></g>`;
     }
     default: {
       const box = localBounds(element);

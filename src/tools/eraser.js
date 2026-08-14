@@ -3,8 +3,6 @@
 // Deletion is a tombstone via the ordinary delete Action, so one undo brings
 // back everything erased in a single stroke.
 
-import { Actions } from "../actions.js";
-
 export const eraserTool = {
   id: "eraser",
   label: "Eraser",
@@ -34,7 +32,9 @@ export const eraserTool = {
     this.state = null;
     app.setFading(null);
     if (!state || !state.ids.size) return;
-    app.history.run(Actions.delete([...state.ids]));
+    // A label goes with the shape it lives in — leaving the text floating where
+    // the box used to be is never what erasing a box meant.
+    app.deleteElements([...state.ids]);
     app.setSelection(new Set());
     app.markStatic();
     app.requestRender();

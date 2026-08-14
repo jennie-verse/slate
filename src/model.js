@@ -60,7 +60,26 @@ export const FONT_CHOICES = [
 
 export const FILL_STYLES = ["hachure", "cross-hatch", "solid", "zigzag"];
 export const STROKE_STYLES = ["solid", "dashed", "dotted"];
-export const ARROWHEADS = [null, "arrow", "bar", "circle", "triangle", "diamond"];
+// Outline variants are stage 2. `dot` is a legacy alias for `circle` in the
+// original and gets no button of its own; crowfoot arrowheads are preserved on
+// import but never offered (Build_Plan 4-3).
+export const ARROWHEADS = [
+  null, "arrow", "bar",
+  "circle", "circle_outline",
+  "triangle", "triangle_outline",
+  "diamond", "diamond_outline",
+];
+export const ARROWHEAD_LABELS = {
+  null: "None",
+  arrow: "Arrow",
+  bar: "Bar",
+  circle: "Dot",
+  circle_outline: "Dot ○",
+  triangle: "Triangle",
+  triangle_outline: "Triangle ▽",
+  diamond: "Diamond",
+  diamond_outline: "Diamond ◇",
+};
 export const ARROW_TYPES = ["sharp", "round"];
 
 export const EDITABLE_TYPES = new Set([
@@ -279,4 +298,58 @@ export const KNOWN_FIELDS = new Set([
 
 export function isSupportedType(type) {
   return EDITABLE_TYPES.has(type);
+}
+
+/**
+ * Deep copy a set of elements with fresh ids, keeping the relationships that
+ * point INSIDE the set and dropping the ones that point outside.
+ *
+ * Duplicate, paste and "insert from library" all need exactly this. Getting it
+ * wrong is subtle and destructive: a pasted arrow that still carries the
+ * original's `startBinding` would re-seat itself onto the shape it was copied
+ * from, and two elements sharing a `groupIds` entry would move as one for ever.
+ */
+export function cloneElements(elements, { offsetX = 0, offsetY = 0 } = {}) {
+  const source = elements.filter(Boolean);
+  const idMap = new Map();
+  const groupMap = new Map();
+  for (const element of source) idMap.set(element.id, newId());
+
+  const remapGroup = (groupId) => {
+    if (!groupMap.has(groupId)) groupMap.set(groupId, newId());
+    return groupMap.get(groupId);
+  };
+
+  return source.map((element) => {
+    const copy = JSON.parse(JSON.stringify(element));
+    copy.id = idMap.get(element.id);
+    copy.index = null;
+    copy.version = 1;
+    copy.versionNonce = newNonce();
+    copy.updated = Date.now();
+    copy.seed = newSeed();
+    copy.x = (copy.x || 0) + offsetX;
+    copy.y = (copy.y || 0) + offsetY;
+    copy.isDeleted = false;
+
+    copy.groupIds = Array.isArray(element.groupIds) ? element.groupIds.map(remapGroup) : [];
+
+    if (copy.containerId) {
+      copy.containerId = idMap.get(copy.containerId) ?? null;
+    }
+    if (Array.isArray(copy.boundElements)) {
+      const kept = copy.boundElements
+        .filter((entry) => entry && idMap.has(entry.id))
+        .map((entry) => ({ ...entry, id: idMap.get(entry.id) }));
+      copy.boundElements = kept.length ? kept : null;
+    }
+    for (const key of ["startBinding", "endBinding"]) {
+      const binding = copy[key];
+      if (!binding) continue;
+      copy[key] = idMap.has(binding.elementId)
+        ? { ...binding, elementId: idMap.get(binding.elementId) }
+        : null;
+    }
+    return copy;
+  });
 }

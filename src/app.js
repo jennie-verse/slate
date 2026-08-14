@@ -11,11 +11,40 @@ import { renderProps } from "./props.js";
 import { entryFor } from "./registry.js";
 import {
   newId, DEFAULT_ELEMENT_STYLE, CANVAS_BACKGROUNDS, displayColor, fontStackFor,
+  cloneElements, createElement, DEFAULT_GRID_SIZE,
 } from "./model.js";
-import { boundsOfMany, localBounds, zoomAt, clamp } from "./geometry.js";
+import {
+  boundsOfMany, localBounds, zoomAt, clamp, viewportBounds, worldBounds, screenToWorld,
+} from "./geometry.js";
 import {
   buildShell, toast, openDialog, confirmDialog, promptDialog, el, svgIcon, anyDialogOpen,
 } from "./ui.js";
+import { openContextMenu, contextMenuOpen } from "./contextmenu.js";
+import {
+  bindingUpdates, affectedArrowIds, withBound, withoutBound,
+} from "./binding.js";
+import {
+  containerUpdates, layoutBoundText, canHoldText, boundTextIdOf, withBoundText,
+  usableWidth, wrapText,
+} from "./containers.js";
+import {
+  groupPatch, ungroupPatch, lockPatch, alignPatch, distributePatch, flipPatch,
+  expandSelection, outerGroupId,
+} from "./arrange.js";
+import { GRID_STEPS, snapValue } from "./snapping.js";
+import {
+  writeElements, readElements, materialise, copyStyles, pasteStyles,
+  hasStyleBuffer, writeImageBlob,
+} from "./clipboard.js";
+import {
+  readImageFile, createImageElement, setFileSource, onImageReady, forgetImages,
+  usedFileIds, ensureImagesReady, ImageError, ACCEPT as IMAGE_ACCEPT,
+} from "./images.js";
+import { findMatches, normaliseLinkInput, safeLink } from "./search.js";
+import {
+  loadLibrary, saveLibrary, makeItem, instantiate, toFile as libraryFile,
+  parseFile as parseLibraryFile, mergeItems, LibraryError,
+} from "./library.js";
 import {
   settings, applyFontStep, resetFontStep, applyTheme, isDark, FONT_STEPS,
   setPanelCollapsed, isStandalone, isIOS, markInstallHintSeen,
@@ -53,6 +82,14 @@ class SlateApp {
     this.saveTimer = null;
     this.saveState = "saved";
     this.frame = null;
+
+    /* stage 2 */
+    this.snapGuides = null;
+    this.bindingTarget = null;
+    this.grid = { enabled: false, size: DEFAULT_GRID_SIZE };
+    this.snapToObjects = true;
+    this.search = null;          // { query, matches, active }
+    this.lastTap = null;
   }
 
   /* ------------------------------------------------------------- lifecycle */
@@ -74,6 +111,12 @@ class SlateApp {
 
     this.renderer = new Renderer(this.dom.canvasHost);
     this.input = new InputManager(this, this.dom.surface);
+    // An image finishing its decode is the one thing that changes the picture
+    // without any action from the user — repaint when it lands.
+    onImageReady(() => {
+      this.markStatic();
+      this.requestRender();
+    });
     this.dom.titleButton.addEventListener("click", () => this.renameCurrentBoard());
     if (settings.panelCollapsed) this.dom.shell.classList.add("panel-collapsed");
 
@@ -125,12 +168,24 @@ class SlateApp {
     this.scene = new Scene(loaded.elements);
     this.history = new History(this.scene);
     this.files = loaded.files || {};
+    // Images are decoded per board; carrying another board's bitmaps around is
+    // wasted memory on a device that has little of it.
+    forgetImages();
+    setFileSource(this.files);
     this.viewport = {
       scrollX: loaded.appState.scrollX ?? 0,
       scrollY: loaded.appState.scrollY ?? 0,
       zoom: loaded.appState.zoom ?? 1,
     };
     this.background = loaded.appState.viewBackgroundColor || DEFAULT_APP_STATE.viewBackgroundColor;
+    // gridSize is the original's appState field: a number when the grid is on,
+    // null when it is off. Storing it that way keeps the round trip honest.
+    this.grid = {
+      enabled: !!loaded.appState.gridSize,
+      size: loaded.appState.gridSize || DEFAULT_GRID_SIZE,
+    };
+    this.snapToObjects = loaded.appState.objectsSnapModeEnabled !== false;
+    this.search = null;
     this.selection = new Set();
     await writeSetting(LAST_BOARD_KEY, id).catch(() => {});
     this.applyBackground();
@@ -191,6 +246,11 @@ class SlateApp {
         editingId: this.editing?.element.id ?? null,
         handleBox: this.handleBox(),
         handleAngle: this.handleAngle(),
+        grid: this.grid.enabled ? this.grid.size : 0,
+        snapGuides: this.snapGuides,
+        bindingTarget: this.bindingTarget,
+        highlights: this.search?.matches || null,
+        activeHighlight: this.search?.active ?? -1,
       });
       this.updateZoomLabel();
     });
@@ -362,12 +422,25 @@ class SlateApp {
     return screenPixels / this.viewport.zoom;
   }
 
+  /** How close an arrow end has to land to attach. Deliberately forgiving. */
+  bindThreshold(event) {
+    const screenPixels = event?.pointerType === "pen" ? 10 : 18;
+    return screenPixels / this.viewport.zoom;
+  }
+
   elementAt(x, y, threshold) {
     const elements = this.scene.visible();
     for (let i = elements.length - 1; i >= 0; i -= 1) {
       const element = elements[i];
       if (element.locked) continue;
-      if (entryFor(element.type).hitTest(element, x, y, threshold)) return element;
+      if (!entryFor(element.type).hitTest(element, x, y, threshold)) continue;
+      // A label belongs to its shape: tapping the words picks up the box.
+      if (element.containerId) {
+        const container = this.scene.get(element.containerId);
+        if (container && !container.isDeleted && !container.locked) return container;
+        continue;
+      }
+      return element;
     }
     return null;
   }
@@ -383,6 +456,7 @@ class SlateApp {
 
   onPointerUp(event) {
     this.activeTool.onPointerUp?.(this, event);
+    this.handleDoubleTap(event);
     this.refreshProps();
   }
 
@@ -433,20 +507,515 @@ class SlateApp {
   duplicateSelection() {
     const elements = this.selectedElements();
     if (!elements.length) return;
-    const copies = elements.map((element) => ({
-      ...JSON.parse(JSON.stringify(element)),
-      id: newId(),
-      index: null,
-      x: element.x + 16,
-      y: element.y + 16,
-      version: 1,
-      updated: Date.now(),
-    }));
+    // cloneElements rewrites ids AND the relationships between them, so a
+    // duplicated box keeps its own label and its own arrow instead of sharing
+    // the original's (model.js).
+    const copies = cloneElements(elements, { offsetX: 16, offsetY: 16 });
     this.history.run(Actions.add(copies));
-    this.setSelection(new Set(copies.map((element) => element.id)));
+    this.setSelection(new Set(copies.filter((element) => !element.containerId).map((element) => element.id)));
     this.markStatic();
     this.requestRender();
     this.scheduleSave();
+  }
+
+  /* ------------------------------------------------------ scene conveniences */
+
+  addElements(elements) {
+    this.history.run(Actions.add(elements));
+    this.markStatic();
+    this.requestRender();
+    this.scheduleSave();
+    return elements;
+  }
+
+  /** Delete, taking labels with their hosts and cleaning up bindings. */
+  deleteElements(ids) {
+    const full = withBoundText(this.scene, ids);
+    if (!full.length) return;
+    const steps = [Actions.delete(full)];
+
+    // A surviving shape must forget the arrow or label that just went, or the
+    // element would keep a boundElements entry pointing at a tombstone — which
+    // then re-attaches to nothing after an undo.
+    const gone = new Set(full);
+    const detached = new Map();
+    const removeFrom = (shapeId, boundId) => {
+      if (!shapeId || gone.has(shapeId)) return;
+      const shape = this.scene.get(shapeId);
+      if (!shape) return;
+      const source = detached.has(shapeId)
+        ? { boundElements: detached.get(shapeId) }
+        : shape;
+      detached.set(shapeId, withoutBound(source, boundId));
+    };
+
+    for (const id of full) {
+      const element = this.scene.get(id);
+      if (!element) continue;
+      if (element.type === "arrow") {
+        removeFrom(element.startBinding?.elementId, id);
+        removeFrom(element.endBinding?.elementId, id);
+      }
+      if (element.containerId) removeFrom(element.containerId, id);
+    }
+    for (const [id, boundElements] of detached) {
+      steps.push(Actions.update([id], { boundElements }));
+    }
+
+    this.history.run(steps.length === 1 ? steps[0] : Actions.batch(steps));
+    this.markStatic();
+    this.requestRender();
+    this.refreshProps();
+    this.scheduleSave();
+  }
+
+  /* -------------------------------------------------------------- snapping */
+
+  gridStep() {
+    return this.grid.enabled ? this.grid.size : 0;
+  }
+
+  objectSnapEnabled() {
+    return this.snapToObjects;
+  }
+
+  /** Where a new element's corner should actually land. */
+  snapPoint(x, y) {
+    const step = this.gridStep();
+    if (!step) return { x, y };
+    return { x: snapValue(x, step), y: snapValue(y, step) };
+  }
+
+  setSnapGuides(guides) {
+    const next = guides?.length ? guides : null;
+    if (!next && !this.snapGuides) return;
+    this.snapGuides = next;
+    this.requestRender();
+  }
+
+  setBindingTarget(element) {
+    if (this.bindingTarget?.id === element?.id) return;
+    this.bindingTarget = element || null;
+    this.requestRender();
+  }
+
+  visibleWorldBox() {
+    const rect = this.dom.canvasHost.getBoundingClientRect();
+    return viewportBounds(this.viewport, rect.width, rect.height, 0);
+  }
+
+  toggleGrid() {
+    this.grid = { ...this.grid, enabled: !this.grid.enabled };
+    this.markStatic();
+    this.requestRender();
+    this.scheduleSave();
+    toast(this.grid.enabled ? `Grid on — ${this.grid.size}px` : "Grid off");
+  }
+
+  setGridSize(size) {
+    this.grid = { enabled: true, size };
+    this.markStatic();
+    this.requestRender();
+    this.scheduleSave();
+  }
+
+  toggleObjectSnap() {
+    this.snapToObjects = !this.snapToObjects;
+    this.scheduleSave();
+    toast(this.snapToObjects ? "Snap to objects on" : "Snap to objects off");
+  }
+
+  /* --------------------------------------------------- bindings and labels */
+
+  /**
+   * Measuring one line of an element's text.
+   * Wrapping and search both need it, and both are pure modules — so the canvas
+   * stays here and gets passed in (Expansion_Plan 2-7).
+   */
+  measureLine = (line, element) => {
+    const ctx = this.renderer.layers.static.ctx;
+    ctx.save();
+    ctx.font = `${element.fontSize || 20}px ${fontStackFor(element.fontFamily)}`;
+    const width = ctx.measureText(line ?? "").width;
+    ctx.restore();
+    return width;
+  };
+
+  /** Elements that follow `ids` around: bound arrows and bound labels. */
+  bindingCompanions(ids) {
+    const moving = new Set(ids);
+    const out = new Set();
+    for (const id of affectedArrowIds(this.scene, ids)) {
+      if (!moving.has(id)) out.add(id);
+    }
+    for (const id of withBoundText(this.scene, ids)) {
+      if (!moving.has(id)) out.add(id);
+    }
+    // A label's own geometry changes when its container resizes.
+    for (const id of ids) {
+      const element = this.scene.get(id);
+      if (element?.containerId && !moving.has(element.containerId)) out.add(element.containerId);
+    }
+    return [...out];
+  }
+
+  /**
+   * Re-seat bound arrows (and optionally re-wrap labels) after `ids` changed.
+   *
+   *   silent  keep it out of the undo stack entirely — the caller is mid-gesture
+   *           and records the whole drag as one step when the finger lifts.
+   *   merge   fold it into the step that just went on the stack. Anything that
+   *           calls history.run() and then syncs MUST use this, or one undo
+   *           takes back the consequence and leaves the cause behind.
+   */
+  syncBindings(ids, { silent = false, layout = false, merge = false } = {}) {
+    const steps = [];
+    const arrows = bindingUpdates(this.scene, ids);
+    if (arrows) steps.push(Actions.update(arrows.elementIds, arrows.changes));
+    if (layout) {
+      const labels = containerUpdates(this.scene, [...ids, ...(arrows?.elementIds || [])], this.measureLine);
+      if (labels) steps.push(Actions.update(labels.elementIds, labels.changes));
+    }
+    if (!steps.length) return null;
+    const action = steps.length === 1 ? steps[0] : Actions.batch(steps);
+    if (silent) return this.history.runSilent(action);
+    if (merge) {
+      const result = this.history.runSilent(action);
+      this.history.mergeIntoLast(result.undo, action);
+      return result;
+    }
+    return this.history.run(action);
+  }
+
+  /** Start a label inside a shape, creating the text element if there is none. */
+  addBoundText(container) {
+    const existingId = boundTextIdOf(container);
+    const existing = existingId ? this.scene.get(existingId) : null;
+    if (existing && !existing.isDeleted) {
+      this.editText(existing);
+      return existing;
+    }
+    const text = createElement("text", {
+      ...this.styleForNew("text"),
+      containerId: container.id,
+      textAlign: "center",
+      verticalAlign: "middle",
+      autoResize: false,
+      x: container.x,
+      y: container.y,
+      width: 0,
+      height: (this.style.fontSize || 20) * 1.25,
+    });
+    // Deliberately NOT added to the scene yet. Tapping a box and changing your
+    // mind must leave no element and no undo step behind — adding first and
+    // deleting on cancel leaves a tombstone and a dangling boundElements entry.
+    this.editText(text, { isNew: true, container });
+    return text;
+  }
+
+  /* ------------------------------------------------------------------ links */
+
+  linkBadgeAtPoint(x, y) {
+    const radius = 12 / this.viewport.zoom;
+    const elements = this.scene.visible();
+    for (let i = elements.length - 1; i >= 0; i -= 1) {
+      const element = elements[i];
+      if (!element.link || element.containerId) continue;
+      const box = worldBounds(element);
+      if (Math.hypot(x - (box.x + box.width), y - box.y) <= radius) return element;
+    }
+    return null;
+  }
+
+  openLink(element) {
+    // Validated again here, not just when it was typed: the value may have
+    // arrived from an imported file (search.js).
+    const href = safeLink(element?.link);
+    if (!href) {
+      toast("That link is not a web address slate will open.", { tone: "warn" });
+      return;
+    }
+    window.open(href, "_blank", "noopener,noreferrer");
+  }
+
+  async editLink() {
+    const [element] = this.selectedElements().filter((item) => !item.containerId);
+    if (!element) return;
+    const value = await promptDialog({
+      title: element.link ? "Edit link" : "Add link",
+      label: "Web address",
+      value: element.link || "",
+      confirmLabel: "Save",
+    });
+    if (value === null) return;
+    const href = normaliseLinkInput(value);
+    if (value.trim() && !href) {
+      toast("Only http and https links can be added.", { tone: "warn", timeout: 5000 });
+      return;
+    }
+    this.history.run(Actions.update([element.id], { link: href }));
+    this.markStatic();
+    this.requestRender();
+    this.refreshProps();
+    this.scheduleSave();
+  }
+
+  /* ------------------------------------------------------ arrange operations */
+
+  /** Every arrange action shares this: run it, then repaint and save. */
+  runPatch(patch, message) {
+    if (!patch) return false;
+    this.history.run(Actions.update(patch.elementIds, patch.changes));
+    this.syncBindings(patch.elementIds, { layout: true, merge: true });
+    this.markStatic();
+    this.requestRender();
+    this.refreshProps();
+    this.scheduleSave();
+    if (message) toast(message);
+    return true;
+  }
+
+  groupSelection() {
+    const ids = this.selectedElements()
+      .filter((element) => !element.containerId)
+      .map((element) => element.id);
+    if (ids.length < 2) {
+      toast("Select two or more things to group.", { tone: "warn" });
+      return;
+    }
+    const patch = groupPatch(this.scene, ids);
+    if (!patch) return;
+    this.history.run(Actions.update(patch.elementIds, patch.changes));
+    this.setSelection(expandSelection(this.scene, patch.elementIds));
+    this.markStatic();
+    this.requestRender();
+    this.scheduleSave();
+    toast(`Grouped ${patch.elementIds.length} items.`);
+  }
+
+  ungroupSelection() {
+    const ids = this.selectedElements().map((element) => element.id);
+    const patch = ungroupPatch(this.scene, ids);
+    if (!patch) {
+      toast("Nothing in the selection is grouped.", { tone: "warn" });
+      return;
+    }
+    this.runPatch(patch, "Ungrouped.");
+  }
+
+  setLocked(locked) {
+    const ids = this.selectedElements().map((element) => element.id);
+    const patch = lockPatch(this.scene, withBoundText(this.scene, ids), locked);
+    if (!patch) return;
+    this.history.run(Actions.update(patch.elementIds, patch.changes));
+    if (locked) this.setSelection(new Set());
+    this.markStatic();
+    this.requestRender();
+    this.refreshProps();
+    this.scheduleSave();
+    toast(locked ? "Locked — tap Menu → Unlock all to release." : "Unlocked.");
+  }
+
+  unlockAll() {
+    const ids = this.scene.visible().filter((element) => element.locked).map((element) => element.id);
+    if (!ids.length) {
+      toast("Nothing on this board is locked.");
+      return;
+    }
+    const patch = lockPatch(this.scene, ids, false);
+    this.history.run(Actions.update(patch.elementIds, patch.changes));
+    this.setSelection(new Set(ids.filter((id) => !this.scene.get(id)?.containerId)));
+    this.markStatic();
+    this.requestRender();
+    this.refreshProps();
+    this.scheduleSave();
+    toast(`Unlocked ${ids.length} item${ids.length === 1 ? "" : "s"}.`);
+  }
+
+  align(mode) {
+    const ids = this.selectedElements().map((element) => element.id);
+    const patch = alignPatch(this.scene, ids, mode);
+    if (!patch) {
+      toast("Select two or more things to align.", { tone: "warn" });
+      return;
+    }
+    this.runPatch(patch);
+  }
+
+  distribute(axis) {
+    const ids = this.selectedElements().map((element) => element.id);
+    const patch = distributePatch(this.scene, ids, axis);
+    if (!patch) {
+      toast("Select three or more things to distribute.", { tone: "warn" });
+      return;
+    }
+    this.runPatch(patch);
+  }
+
+  flip(axis) {
+    const ids = this.selectedElements().map((element) => element.id);
+    const patch = flipPatch(this.scene, withBoundText(this.scene, ids), axis);
+    if (!patch) return;
+    this.runPatch(patch);
+  }
+
+  /* ----------------------------------------------------------- clipboard */
+
+  async copySelection({ cut = false } = {}) {
+    const elements = this.selectedElements();
+    if (!elements.length) return;
+    const full = withBoundText(this.scene, elements.map((element) => element.id))
+      .map((id) => this.scene.get(id))
+      .filter(Boolean);
+    const where = await writeElements(full, this.files);
+    if (cut) {
+      this.deleteElements(elements.map((element) => element.id));
+      this.setSelection(new Set());
+    }
+    toast(where === "system"
+      ? `${cut ? "Cut" : "Copied"} ${full.length} item${full.length === 1 ? "" : "s"}.`
+      : `${cut ? "Cut" : "Copied"} inside slate — this browser would not give up the system clipboard.`);
+  }
+
+  async paste(at) {
+    const payload = await readElements();
+    if (!payload) {
+      toast("Nothing to paste.", { tone: "warn" });
+      return;
+    }
+    const rect = this.dom.canvasHost.getBoundingClientRect();
+    const centre = at || screenToWorld(rect.width / 2, rect.height / 2, this.viewport);
+    const target = Array.isArray(centre) ? { x: centre[0], y: centre[1] } : centre;
+
+    if (!payload.elements.length && payload.text) {
+      const element = createElement("text", {
+        ...this.styleForNew("text"),
+        x: target.x,
+        y: target.y,
+        text: payload.text,
+        originalText: payload.text,
+      });
+      const layout = this.measureLine;
+      const lines = payload.text.split("\n");
+      element.width = Math.ceil(Math.max(...lines.map((line) => layout(line || " ", element))));
+      element.height = Math.ceil(lines.length * element.fontSize * 1.25);
+      this.addElements([element]);
+      this.setSelection(new Set([element.id]));
+      toast("Pasted text.");
+      return;
+    }
+
+    const box = boundsOfMany(payload.elements.filter((element) => !element.isDeleted));
+    const copies = materialise(payload.elements, {
+      offsetX: box ? target.x - (box.x + box.width / 2) : 0,
+      offsetY: box ? target.y - (box.y + box.height / 2) : 0,
+    });
+    if (payload.files && Object.keys(payload.files).length) {
+      this.files = { ...this.files, ...payload.files };
+      setFileSource(this.files);
+    }
+    this.addElements(copies);
+    this.setSelection(new Set(copies.filter((element) => !element.containerId).map((element) => element.id)));
+    toast(`Pasted ${copies.length} item${copies.length === 1 ? "" : "s"}.`);
+  }
+
+  copySelectionStyles() {
+    const [element] = this.selectedElements().filter((item) => !item.containerId);
+    if (!element) return;
+    copyStyles(element);
+    toast("Style copied — select something else and paste it.");
+  }
+
+  pasteSelectionStyles() {
+    const style = pasteStyles();
+    const ids = this.selectedElements().map((element) => element.id);
+    if (!style || !ids.length) {
+      toast("Copy a style first.", { tone: "warn" });
+      return;
+    }
+    this.history.run(Actions.update(ids, style));
+    this.syncBindings(ids, { layout: true, merge: true });
+    this.markStatic();
+    this.requestRender();
+    this.refreshProps();
+    this.scheduleSave();
+    toast("Style applied.");
+  }
+
+  async copyImageToClipboard(kind) {
+    const elements = this.selectedElements().length
+      ? withBoundText(this.scene, this.selectedElements().map((element) => element.id)).map((id) => this.scene.get(id))
+      : this.scene.visible();
+    if (!elements.length) {
+      toast("Nothing to copy.", { tone: "warn" });
+      return;
+    }
+    try {
+      await ensureImagesReady(elements);
+      const blob = kind === "svg"
+        ? await exportSVG(elements, { withBackground: true, background: this.background, dark: false })
+        : (await exportPNG(elements, { scale: 2, withBackground: true, background: this.background, dark: false })).blob;
+      await writeImageBlob(blob);
+      toast(`${kind.toUpperCase()} copied to the clipboard.`);
+    } catch (error) {
+      toast(error.message || "Could not copy that image.", { tone: "error", timeout: 7000 });
+    }
+  }
+
+  /* -------------------------------------------------------------- images */
+
+  insertImageAt(x, y) {
+    const input = el("input", null, { type: "file", accept: IMAGE_ACCEPT });
+    input.style.display = "none";
+    document.body.appendChild(input);
+    input.addEventListener("change", async () => {
+      const file = input.files?.[0];
+      input.remove();
+      if (!file) { this.selectTool("selection"); return; }
+      try {
+        const result = await readImageFile(file);
+        this.files = { ...this.files, [result.fileId]: result.entry };
+        setFileSource(this.files);
+        const element = createImageElement({
+          fileId: result.fileId,
+          width: result.width,
+          height: result.height,
+          x,
+          y,
+          maxWidth: Math.min(480, this.visibleWorldBox().width * 0.6),
+        });
+        this.addElements([element]);
+        this.setSelection(new Set([element.id]));
+        this.selectTool("selection");
+        if (result.shrunk) {
+          toast("Image added — it was made smaller so the board stays inside this device's storage.", { timeout: 6000 });
+        } else {
+          toast("Image added.");
+        }
+      } catch (error) {
+        const message = error instanceof ImageError ? error.message : "That image could not be added.";
+        toast(message, { tone: "error", timeout: 7000 });
+        this.selectTool("selection");
+      }
+    });
+    input.click();
+  }
+
+  /**
+   * Drop image data no element points at any more.
+   * Tombstones count as users: an erased photo has to survive until the undo
+   * history that could bring it back is gone with the session.
+   */
+  pruneFiles() {
+    const used = usedFileIds(this.scene.all());
+    let changed = false;
+    const next = {};
+    for (const [id, entry] of Object.entries(this.files)) {
+      if (used.has(id)) next[id] = entry; else changed = true;
+    }
+    if (!changed) return;
+    this.files = next;
+    setFileSource(this.files);
   }
 
   /* -------------------------------------------------------------- text edit */
@@ -455,16 +1024,19 @@ class SlateApp {
     return !!this.editing;
   }
 
-  editText(element, { isNew = false } = {}) {
+  editText(element, { isNew = false, container = null } = {}) {
     this.commitText();
     const textarea = el("textarea", "text-editor", {
       "aria-label": "Text",
       spellcheck: "false",
       autocapitalize: "sentences",
     });
-    textarea.value = element.text || "";
+    // A label edits the text as TYPED, never the wrapped copy — otherwise every
+    // edit would bake the current line breaks into the source (containers.js).
+    textarea.value = (element.containerId ? element.originalText : element.text) || "";
     this.dom.canvasHost.appendChild(textarea);
-    this.editing = { element, textarea, isNew, composing: false };
+    const host = container || (element.containerId ? this.scene.get(element.containerId) : null);
+    this.editing = { element, textarea, isNew, container: host, composing: false };
 
     // Korean IME: while composing, Enter and Escape belong to the IME.
     textarea.addEventListener("compositionstart", () => { this.editing.composing = true; });
@@ -490,40 +1062,74 @@ class SlateApp {
 
   positionEditor() {
     if (!this.editing) return;
-    const { element, textarea } = this.editing;
-    const displaySize = (element.fontSize || 20) * this.viewport.zoom;
+    const { element, textarea, container } = this.editing;
+    const fontSize = element.fontSize || 20;
+    const lineHeight = element.lineHeight || 1.25;
+    const displaySize = fontSize * this.viewport.zoom;
     // The textarea stays at 16px so iOS never auto-zooms the page, and a CSS
     // transform scales it to the size the drawing actually shows. Setting
     // font-size to displaySize directly would trip iOS's <16px rule as soon as
     // the canvas is zoomed out (Build_Plan 7-1).
     const scale = displaySize / 16;
+
+    let worldX = element.x;
+    let worldY = element.y;
+    let cssWidth = null;
+    let align = element.textAlign || "left";
+    let lineCount = textarea.value.split("\n").length;
+
+    if (container && !container.isDeleted) {
+      // Inside a shape the editor occupies the same box the wrapped text will,
+      // so what is typed sits exactly where it will land.
+      const usable = usableWidth(container);
+      const box = localBounds(container);
+      const wrapped = wrapText(textarea.value, usable, (line) => this.measureLine(line || " ", element));
+      lineCount = Math.max(1, wrapped.length);
+      const height = lineCount * fontSize * lineHeight;
+      worldX = box.x + (Math.abs(box.width) - usable) / 2;
+      worldY = box.y + (Math.abs(box.height) - height) / 2;
+      // World units → the textarea's own 16px coordinate space.
+      cssWidth = (usable * 16) / fontSize;
+      align = "center";
+    }
+
     const [screenX, screenY] = [
-      (element.x + this.viewport.scrollX) * this.viewport.zoom,
-      (element.y + this.viewport.scrollY) * this.viewport.zoom,
+      (worldX + this.viewport.scrollX) * this.viewport.zoom,
+      (worldY + this.viewport.scrollY) * this.viewport.zoom,
     ];
-    const lines = textarea.value.split("\n");
-    const columns = Math.max(6, ...lines.map((line) => line.length + 1));
 
     textarea.style.left = `${screenX}px`;
     textarea.style.top = `${screenY}px`;
     textarea.style.fontSize = "16px";
-    textarea.style.lineHeight = String(element.lineHeight || 1.25);
+    textarea.style.lineHeight = String(lineHeight);
     textarea.style.fontFamily = fontStackFor(element.fontFamily);
     textarea.style.color = displayColor(element.strokeColor, this.isDark());
-    textarea.style.textAlign = element.textAlign || "left";
+    textarea.style.textAlign = align;
     textarea.style.transform = `scale(${scale})`;
     textarea.style.transformOrigin = "left top";
-    textarea.style.width = `${columns}ch`;
-    textarea.style.height = `${lines.length * 16 * (element.lineHeight || 1.25) + 6}px`;
+    if (cssWidth) {
+      textarea.style.width = `${Math.max(32, cssWidth)}px`;
+      textarea.style.whiteSpace = "pre-wrap";
+    } else {
+      const columns = Math.max(6, ...textarea.value.split("\n").map((line) => line.length + 1));
+      textarea.style.width = `${columns}ch`;
+      textarea.style.whiteSpace = "pre";
+    }
+    textarea.style.height = `${lineCount * 16 * lineHeight + 6}px`;
   }
 
   commitText() {
     const editing = this.editing;
     if (!editing) return;
     this.editing = null;
-    const { element, textarea, isNew } = editing;
+    const { element, textarea, isNew, container } = editing;
     const text = textarea.value;
     textarea.remove();
+
+    if (container) {
+      this.commitBoundText(editing, text);
+      return;
+    }
 
     if (!text.trim()) {
       // An empty text element is invisible and unselectable — remove it rather
@@ -559,6 +1165,49 @@ class SlateApp {
     this.scheduleSave();
   }
 
+  /** The label branch of commitText — wrapping, and growing the host to fit. */
+  commitBoundText({ element, isNew, container }, text) {
+    const host = this.scene.get(container.id) || container;
+    const emptied = !text.trim();
+
+    if (isNew && emptied) {
+      // Never added to the scene, so there is nothing to take back out.
+      this.markStatic();
+      this.requestRender();
+      return;
+    }
+
+    if (emptied) {
+      this.history.run(Actions.batch([
+        Actions.delete([element.id]),
+        Actions.update([host.id], { boundElements: withoutBound(host, element.id) }),
+      ]));
+    } else {
+      const draft = { ...element, text, originalText: text };
+      const layout = layoutBoundText(host, draft, this.measureLine);
+      const steps = [];
+      if (isNew) {
+        steps.push(Actions.add([{ ...draft, ...layout.text }]));
+        steps.push(Actions.update([host.id], {
+          boundElements: withBound(host, element.id, "text"),
+        }));
+      } else {
+        steps.push(Actions.update([element.id], { originalText: text, ...layout.text }));
+      }
+      if (layout.container) steps.push(Actions.update([host.id], layout.container));
+      this.history.run(steps.length === 1 ? steps[0] : Actions.batch(steps));
+      // The host may have grown; anything attached to it has to follow — as
+      // part of the SAME undo step, not a second one.
+      this.syncBindings([host.id], { layout: true, merge: true });
+      this.setSelection(new Set([host.id]));
+    }
+
+    this.markStatic();
+    this.requestRender();
+    this.refreshProps();
+    this.scheduleSave();
+  }
+
   /* ------------------------------------------------------------------ save */
 
   setSaveState(state) {
@@ -581,6 +1230,9 @@ class SlateApp {
     if (!this.board) return;
     clearTimeout(this.saveTimer);
     if (!blocking) this.setSaveState("saving");
+    // Images whose element is gone for good would otherwise stay in storage
+    // for ever. Tombstoned elements still count as users, so undo still works.
+    this.pruneFiles();
     const payload = {
       elements: this.scene.toJSON(),
       appState: {
@@ -588,6 +1240,8 @@ class SlateApp {
         scrollY: this.viewport.scrollY,
         zoom: this.viewport.zoom,
         viewBackgroundColor: this.background,
+        gridSize: this.grid.enabled ? this.grid.size : null,
+        objectsSnapModeEnabled: this.snapToObjects,
       },
       files: this.files,
     };
@@ -603,10 +1257,357 @@ class SlateApp {
     }
   }
 
+  /* -------------------------------------------------------------- search */
+
+  openSearch() {
+    let input = null;
+    const dialog = openDialog({
+      title: "Find on this board",
+      build: (body, close) => {
+        const field = el("label", "field");
+        field.appendChild(el("span", "field-label", { text: "Text to find" }));
+        input = el("input", "input", { type: "text", value: this.search?.query || "" });
+        field.appendChild(input);
+        body.appendChild(field);
+
+        const count = el("p", "dialog-note", { text: "Type to search." });
+        body.appendChild(count);
+
+        const run = () => {
+          const matches = findMatches(this.scene.visible(), input.value, this.measureLine);
+          this.search = matches.length
+            ? { query: input.value, matches, active: 0 }
+            : { query: input.value, matches: [], active: -1 };
+          count.textContent = input.value.trim()
+            ? (matches.length ? `${matches.length} match${matches.length === 1 ? "" : "es"}.` : "No matches.")
+            : "Type to search.";
+          this.renderer.markOverlayDirty();
+          this.requestRender();
+          if (matches.length) this.goToMatch(0);
+        };
+
+        // Korean IME: recompute on composition end, not on every keystroke
+        // while a syllable is still being assembled.
+        input.addEventListener("input", () => { if (!input.composing) run(); });
+        input.addEventListener("compositionstart", () => { input.composing = true; });
+        input.addEventListener("compositionend", () => { input.composing = false; run(); });
+        input.addEventListener("keydown", (event) => {
+          if (event.key !== "Enter" || event.isComposing || event.keyCode === 229) return;
+          event.preventDefault();
+          this.stepMatch(event.shiftKey ? -1 : 1);
+        });
+
+        const row = el("div", "dialog-actions");
+        const previous = el("button", "button", { type: "button", text: "Previous" });
+        const next = el("button", "button", { type: "button", text: "Next" });
+        const done = el("button", "button button-primary", { type: "button", text: "Done" });
+        previous.addEventListener("click", () => this.stepMatch(-1));
+        next.addEventListener("click", () => this.stepMatch(1));
+        done.addEventListener("click", close);
+        row.appendChild(previous);
+        row.appendChild(next);
+        row.appendChild(done);
+        body.appendChild(row);
+        if (input.value) run();
+      },
+      onClose: () => {
+        this.search = null;
+        this.renderer.markOverlayDirty();
+        this.requestRender();
+      },
+    });
+    return dialog;
+  }
+
+  stepMatch(direction) {
+    if (!this.search?.matches?.length) return;
+    const total = this.search.matches.length;
+    const next = ((this.search.active + direction) % total + total) % total;
+    this.goToMatch(next);
+  }
+
+  goToMatch(index) {
+    const hit = this.search?.matches?.[index];
+    if (!hit) return;
+    this.search.active = index;
+    const rect = this.dom.canvasHost.getBoundingClientRect();
+    const box = hit.box;
+    this.setViewport({
+      scrollX: rect.width / (2 * this.viewport.zoom) - (box.x + box.width / 2),
+      scrollY: rect.height / (2 * this.viewport.zoom) - (box.y + box.height / 2),
+    });
+    this.renderer.markOverlayDirty();
+    this.requestRender();
+  }
+
+  /* ------------------------------------------------------------- library */
+
+  async openLibrary() {
+    const items = await loadLibrary();
+    openDialog({
+      title: "Shape library",
+      wide: true,
+      build: (body, close) => {
+        const selected = this.selectedElements().filter((element) => !element.containerId);
+        const actions = el("div", "dialog-actions");
+        const add = el("button", "button button-primary", {
+          type: "button", text: `Add selection (${selected.length})`,
+        });
+        add.disabled = !selected.length;
+        add.addEventListener("click", async () => {
+          close();
+          await this.addSelectionToLibrary();
+        });
+        const importButton = el("button", "button", { type: "button", text: "Import…" });
+        importButton.addEventListener("click", () => { close(); this.importLibrary(); });
+        const exportButton = el("button", "button", { type: "button", text: "Export…" });
+        exportButton.disabled = !items.length;
+        exportButton.addEventListener("click", async () => { close(); await this.exportLibrary(items); });
+        actions.appendChild(importButton);
+        actions.appendChild(exportButton);
+        actions.appendChild(add);
+        body.appendChild(actions);
+
+        if (!items.length) {
+          body.appendChild(el("p", "dialog-text", {
+            text: "Nothing saved yet. Select some shapes on the canvas and choose “Add selection” to keep them here.",
+          }));
+          return;
+        }
+
+        const list = el("div", "library-list");
+        for (const item of items) {
+          const row = el("div", "library-row");
+          const insert = el("button", "library-insert", { type: "button" });
+          insert.appendChild(el("span", "library-name", {
+            text: item.name || `${item.elements.length} shape${item.elements.length === 1 ? "" : "s"}`,
+          }));
+          insert.appendChild(el("span", "library-meta", {
+            text: `${item.elements.length} element${item.elements.length === 1 ? "" : "s"}`,
+          }));
+          insert.addEventListener("click", () => {
+            close();
+            this.insertLibraryItem(item);
+          });
+          row.appendChild(insert);
+
+          const remove = el("button", "icon-button", {
+            type: "button", "aria-label": `Remove ${item.name || "item"}`, html: svgIcon("close", 18),
+          });
+          remove.addEventListener("click", async () => {
+            const rest = items.filter((entry) => entry.id !== item.id);
+            await saveLibrary(rest);
+            close();
+            toast("Removed from the library.");
+          });
+          row.appendChild(remove);
+          list.appendChild(row);
+        }
+        body.appendChild(list);
+      },
+    });
+  }
+
+  async addSelectionToLibrary() {
+    const ids = this.selectedElements().map((element) => element.id);
+    const elements = withBoundText(this.scene, ids).map((id) => this.scene.get(id)).filter(Boolean);
+    if (!elements.length) return;
+    const name = await promptDialog({
+      title: "Save to library", label: "Name (optional)", value: "", confirmLabel: "Save",
+    });
+    const items = await loadLibrary();
+    await saveLibrary([makeItem(elements, name || ""), ...items]);
+    toast("Saved to the library.");
+  }
+
+  insertLibraryItem(item) {
+    const rect = this.dom.canvasHost.getBoundingClientRect();
+    const [cx, cy] = screenToWorld(rect.width / 2, rect.height / 2, this.viewport);
+    const elements = instantiate(item, cx, cy);
+    this.addElements(elements);
+    this.setSelection(new Set(elements.filter((element) => !element.containerId).map((element) => element.id)));
+    toast(`Inserted ${elements.length} element${elements.length === 1 ? "" : "s"}.`);
+  }
+
+  async exportLibrary(items) {
+    const blob = new Blob([JSON.stringify(libraryFile(items))], { type: "application/json" });
+    await shareOrDownload(blob, safeFilename("library", "excalidrawlib"));
+    toast("Library exported.");
+  }
+
+  importLibrary() {
+    const input = el("input", null, { type: "file", accept: ".excalidrawlib,application/json,.json" });
+    input.style.display = "none";
+    document.body.appendChild(input);
+    input.addEventListener("change", async () => {
+      const file = input.files?.[0];
+      input.remove();
+      if (!file) return;
+      try {
+        const incoming = parseLibraryFile(await file.text());
+        const existing = await loadLibrary();
+        const merged = mergeItems(existing, incoming);
+        await saveLibrary(merged);
+        toast(`Added ${merged.length - existing.length} library item${merged.length - existing.length === 1 ? "" : "s"}.`);
+      } catch (error) {
+        const message = error instanceof LibraryError ? error.message : "Could not read that library file.";
+        toast(message, { tone: "error", timeout: 7000 });
+      }
+    });
+    input.click();
+  }
+
+  /* -------------------------------------------------------- context menu */
+
+  openContextMenu(world, screen) {
+    if (this.editing) this.commitText();
+    const hit = this.elementAt(world.x, world.y, this.hitThreshold(world));
+    if (hit && !this.selection.has(hit.id)) {
+      this.setSelection(expandSelection(this.scene, [hit.id]));
+    }
+    const selected = this.selectedElements().filter((element) => !element.containerId);
+    const single = selected.length === 1 ? selected[0] : null;
+    const grouped = selected.some((element) => outerGroupId(element));
+
+    const items = [];
+    if (selected.length) {
+      items.push({ label: "Cut", hint: "⌘X", onSelect: () => this.copySelection({ cut: true }) });
+      items.push({ label: "Copy", hint: "⌘C", onSelect: () => this.copySelection() });
+    }
+    items.push({ label: "Paste", hint: "⌘V", onSelect: () => this.paste(world) });
+
+    if (selected.length) {
+      items.push({ separator: true });
+      items.push({ label: "Duplicate", hint: "⌘D", onSelect: () => this.duplicateSelection() });
+      if (single && canHoldText(single)) {
+        items.push({
+          label: boundTextIdOf(single) ? "Edit label" : "Add label",
+          onSelect: () => this.addBoundText(this.scene.get(single.id)),
+        });
+      }
+      items.push({
+        label: single?.link ? "Edit link" : "Add link",
+        onSelect: () => this.editLink(),
+        disabled: !single,
+      });
+      items.push({ separator: true });
+      items.push({ label: "Copy styles", onSelect: () => this.copySelectionStyles(), disabled: !single });
+      items.push({ label: "Paste styles", onSelect: () => this.pasteSelectionStyles(), disabled: !hasStyleBuffer() });
+      items.push({ separator: true });
+      if (selected.length > 1) {
+        items.push({ label: "Group", hint: "⌘G", onSelect: () => this.groupSelection() });
+      }
+      if (grouped) {
+        items.push({ label: "Ungroup", hint: "⇧⌘G", onSelect: () => this.ungroupSelection() });
+      }
+      items.push({ label: "Lock", onSelect: () => this.setLocked(true) });
+      items.push({ separator: true });
+      items.push({ label: "Bring to front", onSelect: () => this.reorderSelection("front") });
+      items.push({ label: "Send to back", onSelect: () => this.reorderSelection("back") });
+      items.push({ separator: true });
+      items.push({
+        label: "Delete",
+        hint: "⌫",
+        danger: true,
+        onSelect: () => {
+          this.deleteElements(selected.map((element) => element.id));
+          this.setSelection(new Set());
+        },
+      });
+    } else {
+      items.push({ separator: true });
+      items.push({ label: "Select all", hint: "⌘A", onSelect: () => this.selectAll() });
+      items.push({ label: this.grid.enabled ? "Hide grid" : "Show grid", hint: "⌘'", onSelect: () => this.toggleGrid() });
+      items.push({ label: "Zoom to fit", hint: "⇧1", onSelect: () => this.scrollBackToContent() });
+    }
+
+    openContextMenu({ x: screen.clientX, y: screen.clientY, items });
+  }
+
+  reorderSelection(to) {
+    const ids = this.selectedElements().map((element) => element.id);
+    if (!ids.length) return;
+    this.history.run(Actions.reorder(ids, to));
+    this.markStatic();
+    this.requestRender();
+    this.scheduleSave();
+  }
+
+  selectAll() {
+    const ids = this.scene.visible()
+      .filter((element) => !element.locked && !element.containerId)
+      .map((element) => element.id);
+    this.setSelection(expandSelection(this.scene, ids));
+  }
+
+  zoomToSelection() {
+    const elements = this.selectedElements();
+    if (!elements.length) {
+      this.scrollBackToContent();
+      return;
+    }
+    const box = boundsOfMany(elements);
+    const rect = this.dom.canvasHost.getBoundingClientRect();
+    const margin = 60;
+    const zoom = clamp(Math.min(
+      (rect.width - margin * 2) / Math.max(box.width, 1),
+      (rect.height - margin * 2) / Math.max(box.height, 1),
+    ), 0.1, 4);
+    this.setViewport({
+      zoom,
+      scrollX: rect.width / (2 * zoom) - (box.x + box.width / 2),
+      scrollY: rect.height / (2 * zoom) - (box.y + box.height / 2),
+    });
+    this.scheduleSave();
+  }
+
+  /** Double tap: edit a label, or start one on a shape that has none. */
+  handleDoubleTap(event) {
+    if (this.activeTool.id !== "selection" || this.editing) return false;
+    const now = Date.now();
+    const previous = this.lastTap;
+    this.lastTap = { x: event.x, y: event.y, at: now };
+    if (!previous) return false;
+    const near = Math.hypot(event.x - previous.x, event.y - previous.y) * this.viewport.zoom < 16;
+    if (now - previous.at > 320 || !near) return false;
+    this.lastTap = null;
+
+    const threshold = this.hitThreshold(event);
+    const hit = this.elementAt(event.x, event.y, threshold);
+    if (hit?.type === "text" && !hit.containerId) {
+      this.editText(hit);
+      return true;
+    }
+    const container = hit && canHoldText(hit) ? hit : this.containerAt(event.x, event.y, threshold);
+    if (container) {
+      this.addBoundText(container);
+      return true;
+    }
+    return false;
+  }
+
+  /**
+   * A shape that can hold text, hit as if it were filled.
+   * Selecting an unfilled box still needs its outline — that is the original's
+   * rule and changing it would make overlapping shapes unpickable. But putting
+   * text IN one is a different intent, and the inside is the obvious target.
+   */
+  containerAt(x, y, threshold) {
+    const elements = this.scene.visible();
+    for (let i = elements.length - 1; i >= 0; i -= 1) {
+      const element = elements[i];
+      if (!canHoldText(element)) continue;
+      if (entryFor(element.type).hitTest({ ...element, backgroundColor: "#fill" }, x, y, threshold)) {
+        return element;
+      }
+    }
+    return null;
+  }
+
   /* -------------------------------------------------------------- shortcuts */
 
   onKeyDown(event, typing) {
-    if (typing || anyDialogOpen()) return;
+    if (typing || anyDialogOpen() || contextMenuOpen()) return;
     const meta = event.metaKey || event.ctrlKey;
 
     if (meta && event.key.toLowerCase() === "z") {
@@ -621,12 +1622,49 @@ class SlateApp {
     }
     if (meta && event.key.toLowerCase() === "a") {
       event.preventDefault();
-      this.setSelection(new Set(this.scene.visible().filter((element) => !element.locked).map((e) => e.id)));
+      this.selectAll();
       return;
     }
     if (meta && event.key.toLowerCase() === "d") {
       event.preventDefault();
       this.duplicateSelection();
+      return;
+    }
+    if (meta && event.key.toLowerCase() === "g") {
+      event.preventDefault();
+      if (event.shiftKey) this.ungroupSelection(); else this.groupSelection();
+      return;
+    }
+    if (meta && event.key.toLowerCase() === "c") {
+      event.preventDefault();
+      this.copySelection();
+      return;
+    }
+    if (meta && event.key.toLowerCase() === "x") {
+      event.preventDefault();
+      this.copySelection({ cut: true });
+      return;
+    }
+    if (meta && event.key.toLowerCase() === "v") {
+      event.preventDefault();
+      this.paste();
+      return;
+    }
+    if (meta && event.key.toLowerCase() === "f") {
+      event.preventDefault();
+      this.openSearch();
+      return;
+    }
+    if (meta && event.key === "'") {
+      event.preventDefault();
+      this.toggleGrid();
+      return;
+    }
+    if (meta && (event.key === "]" || event.key === "[")) {
+      event.preventDefault();
+      this.reorderSelection(event.key === "]"
+        ? (event.shiftKey ? "front" : "forward")
+        : (event.shiftKey ? "back" : "backward"));
       return;
     }
     if (meta) return;
@@ -635,11 +1673,8 @@ class SlateApp {
       const ids = [...this.selection];
       if (!ids.length) return;
       event.preventDefault();
-      this.history.run(Actions.delete(ids));
+      this.deleteElements(ids);
       this.setSelection(new Set());
-      this.markStatic();
-      this.requestRender();
-      this.scheduleSave();
       return;
     }
     if (event.key === "Escape") {
@@ -647,12 +1682,32 @@ class SlateApp {
       this.setSelection(new Set());
       return;
     }
-    if (event.key === "Enter" && this.selection.size === 1) {
-      const element = this.selectedElements()[0];
+    if (event.key === "Enter" && this.selection.size >= 1) {
+      const [element] = this.selectedElements().filter((item) => !item.containerId);
       if (element?.type === "text") {
         event.preventDefault();
         this.editText(element);
+        return;
       }
+      if (canHoldText(element)) {
+        event.preventDefault();
+        this.addBoundText(element);
+      }
+      return;
+    }
+    if (event.shiftKey && (event.key === "1" || event.key === "!")) {
+      event.preventDefault();
+      this.scrollBackToContent();
+      return;
+    }
+    if (event.shiftKey && (event.key === "2" || event.key === "@")) {
+      event.preventDefault();
+      this.zoomToSelection();
+      return;
+    }
+    if (event.shiftKey && ["H", "V"].includes(event.key.toUpperCase()) && this.selection.size) {
+      event.preventDefault();
+      this.flip(event.key.toUpperCase() === "H" ? "x" : "y");
       return;
     }
     if (["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"].includes(event.key) && this.selection.size) {
@@ -666,6 +1721,9 @@ class SlateApp {
         return { x: element.x + dx, y: element.y + dy };
       });
       this.history.run(Actions.update(ids, changes));
+      // Nudging with the keyboard moves elements exactly like dragging does, so
+      // bound arrows and labels have to follow it too.
+      this.syncBindings(ids, { layout: true, merge: true });
       this.markStatic();
       this.requestRender();
       this.scheduleSave();
@@ -747,13 +1805,24 @@ class SlateApp {
         };
         item("Boards", "Open, rename or delete a board", () => this.openBoardList());
         item("New board", "Start an empty canvas", () => this.newBoard());
+        item("Find on this board", "Search the text you have written", () => this.openSearch());
+        item("Shape library", "Save and reuse shapes", () => this.openLibrary());
+        item(
+          this.grid.enabled ? `Hide grid (${this.grid.size}px)` : "Show grid",
+          "Snap new shapes to a fixed step",
+          () => this.toggleGrid(),
+        );
+        item("Grid and snapping", "Grid size, snap to objects", () => this.openSnapDialog());
         item("Canvas background", "Change this board's paper colour", () => this.openBackgroundDialog());
         // Also reachable from the top bar on wide screens; on a phone the top
         // bar has no room for it, and losing the viewport on an infinite canvas
         // needs a way back that is always present.
         item("Scroll back to content", "Bring the drawing into view", () => this.scrollBackToContent());
+        item("Zoom to selection", null, () => this.zoomToSelection());
         item("Reset zoom to 100%", null, () => this.stepZoom(0));
+        item("Unlock all", "Release everything locked on this board", () => this.unlockAll());
         item("Export image", "PNG or SVG", () => this.openExportDialog());
+        item("Copy image to clipboard", "PNG of the selection, or the board", () => this.copyImageToClipboard("png"));
         item("Export .excalidraw", "Opens on excalidraw.com", () => this.exportExcalidraw());
         item("Import .excalidraw", "Add a drawing to this board", () => this.importExcalidraw());
         item("Backup all boards", "One JSON file with everything", () => this.doBackup());
@@ -845,6 +1914,52 @@ class SlateApp {
         create.addEventListener("click", async () => { close(); await this.newBoard(); });
         actions.appendChild(create);
         body.appendChild(actions);
+      },
+    });
+  }
+
+  openSnapDialog() {
+    openDialog({
+      title: "Grid and snapping",
+      build: (body) => {
+        body.appendChild(checkboxRow("Show grid", this.grid.enabled, (value) => {
+          this.grid = { ...this.grid, enabled: value };
+          this.markStatic();
+          this.requestRender();
+          this.scheduleSave();
+        }));
+
+        const sizeGroup = el("div", "prop-group");
+        sizeGroup.appendChild(el("div", "prop-label", { text: "Grid size" }));
+        const sizeRow = el("div", "prop-row");
+        for (const size of GRID_STEPS) {
+          const button = el("button", `opt${this.grid.size === size ? " is-on" : ""}`, {
+            type: "button",
+            text: String(size),
+            "aria-label": `${size} pixels`,
+            "aria-pressed": this.grid.size === size ? "true" : "false",
+          });
+          button.addEventListener("click", () => {
+            this.setGridSize(size);
+            for (const sibling of sizeRow.children) {
+              const on = sibling === button;
+              sibling.classList.toggle("is-on", on);
+              sibling.setAttribute("aria-pressed", on ? "true" : "false");
+            }
+          });
+          sizeRow.appendChild(button);
+        }
+        sizeGroup.appendChild(sizeRow);
+        body.appendChild(sizeGroup);
+
+        body.appendChild(checkboxRow("Snap to other objects", this.snapToObjects, (value) => {
+          this.snapToObjects = value;
+          this.scheduleSave();
+        }));
+        // Two snaps that would fight each other, so only one is ever live.
+        body.appendChild(el("p", "dialog-note", {
+          text: "With the grid on, dragging snaps to the grid. With it off, dragging lines up with other objects instead. Hold Option while dragging to turn snapping off for one move.",
+        }));
       },
     });
   }

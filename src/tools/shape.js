@@ -12,22 +12,24 @@ function makeShapeTool({ id, label, shortcut }) {
     propsSchema: "shape",
 
     onPointerDown(app, event) {
+      const origin = app.snapPoint(event.x, event.y);
       const element = createElement(id, {
         ...app.styleForNew(id),
-        x: event.x,
-        y: event.y,
+        x: origin.x,
+        y: origin.y,
         width: 0,
         height: 0,
       });
-      this.state = { element, origin: { x: event.x, y: event.y } };
+      this.state = { element, origin };
       app.setDraft(element);
     },
 
     onPointerMove(app, event) {
       const state = this.state;
       if (!state) return;
-      let width = event.x - state.origin.x;
-      let height = event.y - state.origin.y;
+      const corner = app.snapPoint(event.x, event.y);
+      let width = corner.x - state.origin.x;
+      let height = corner.y - state.origin.y;
       if (event.shiftKey) {
         const size = Math.max(Math.abs(width), Math.abs(height));
         width = Math.sign(width || 1) * size;

@@ -10,6 +10,9 @@
 
 import { screenToWorld, zoomAt, clamp } from "./geometry.js";
 
+const LONG_PRESS_MS = 480;
+const LONG_PRESS_SLOP = 8;      // screen px of drift still counted as "held"
+
 export class InputManager {
   constructor(app, surface) {
     this.app = app;
@@ -18,6 +21,7 @@ export class InputManager {
     this.penActive = false;
     this.touches = new Map();
     this.pinch = null;
+    this.longPress = null;
     this.bind();
   }
 
@@ -30,7 +34,14 @@ export class InputManager {
     surface.addEventListener("pointercancel", this.onPointerCancel);
     surface.addEventListener("pointerleave", this.onPointerUp);
     surface.addEventListener("wheel", this.onWheel, { passive: false });
-    surface.addEventListener("contextmenu", (event) => event.preventDefault());
+    // The browser menu is replaced, not just suppressed — a right click on a
+    // desktop opens the same menu a long press opens on the iPad.
+    surface.addEventListener("contextmenu", (event) => {
+      event.preventDefault();
+      this.cancelLongPress();
+      const world = this.toWorldEvent(event);
+      this.app.openContextMenu(world, { clientX: event.clientX, clientY: event.clientY });
+    });
     // Safari-only pinch events would zoom the page under the canvas.
     for (const type of ["gesturestart", "gesturechange", "gestureend"]) {
       surface.addEventListener(type, (event) => event.preventDefault());
@@ -99,25 +110,64 @@ export class InputManager {
     event.preventDefault();
     this.activePointerId = event.pointerId;
     try { this.surface.setPointerCapture(event.pointerId); } catch { /* not fatal */ }
+    this.startLongPress(event);
     this.app.onPointerDown(this.toWorldEvent(event));
   };
+
+  /* ------------------------------------------------------------ long press */
+
+  startLongPress(event) {
+    this.cancelLongPress();
+    if (event.pointerType === "pen") return;   // a held pen is drawing, not asking
+    const clientX = event.clientX;
+    const clientY = event.clientY;
+    this.longPress = {
+      clientX,
+      clientY,
+      timer: setTimeout(() => {
+        this.longPress = null;
+        // Cancel the gesture in progress first, or the menu opens on top of a
+        // half-finished drag that would commit as soon as the finger lifts.
+        this.cancelActive();
+        const world = this.toWorldEvent({
+          clientX, clientY, shiftKey: false, altKey: false, pointerType: event.pointerType,
+        });
+        this.app.openContextMenu(world, { clientX, clientY });
+      }, LONG_PRESS_MS),
+    };
+  }
+
+  cancelLongPress() {
+    if (!this.longPress) return;
+    clearTimeout(this.longPress.timer);
+    this.longPress = null;
+  }
+
+  trackLongPress(event) {
+    if (!this.longPress) return;
+    const drift = Math.hypot(event.clientX - this.longPress.clientX, event.clientY - this.longPress.clientY);
+    if (drift > LONG_PRESS_SLOP) this.cancelLongPress();
+  }
 
   onPointerMove = (event) => {
     if (event.pointerType === "touch" && this.touches.has(event.pointerId)) {
       this.touches.set(event.pointerId, { x: event.clientX, y: event.clientY });
     }
     if (this.pinch) {
+      this.cancelLongPress();
       event.preventDefault();
       this.updatePinch();
       return;
     }
     if (event.pointerId !== this.activePointerId) return;
     if (this.penActive && event.pointerType === "touch") return;
+    this.trackLongPress(event);
     event.preventDefault();
     this.app.onPointerMove(this.toWorldEvent(event, this.coalescedSamples(event)));
   };
 
   onPointerUp = (event) => {
+    this.cancelLongPress();
     if (event.pointerType === "touch") this.touches.delete(event.pointerId);
     if (this.pinch && this.touches.size < 2) {
       this.pinch = null;
@@ -131,6 +181,7 @@ export class InputManager {
   };
 
   onPointerCancel = (event) => {
+    this.cancelLongPress();
     if (event.pointerType === "touch") this.touches.delete(event.pointerId);
     if (event.pointerId !== this.activePointerId) return;
     this.activePointerId = null;
