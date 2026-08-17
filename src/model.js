@@ -309,7 +309,7 @@ export function isSupportedType(type) {
  * original's `startBinding` would re-seat itself onto the shape it was copied
  * from, and two elements sharing a `groupIds` entry would move as one for ever.
  */
-export function cloneElements(elements, { offsetX = 0, offsetY = 0 } = {}) {
+export function cloneElements(elements, { offsetX = 0, offsetY = 0, keepSeed = false } = {}) {
   const source = elements.filter(Boolean);
   const idMap = new Map();
   const groupMap = new Map();
@@ -327,7 +327,10 @@ export function cloneElements(elements, { offsetX = 0, offsetY = 0 } = {}) {
     copy.version = 1;
     copy.versionNonce = newNonce();
     copy.updated = Date.now();
-    copy.seed = newSeed();
+    // A duplicate gets a new seed so the two copies do not look identical.
+    // An IMPORT keeps it — the file should render the way it did where it came
+    // from, and the seed is what rough.js derives the hand-drawn wobble from.
+    if (!keepSeed) copy.seed = newSeed();
     copy.x = (copy.x || 0) + offsetX;
     copy.y = (copy.y || 0) + offsetY;
     copy.isDeleted = false;
@@ -336,6 +339,12 @@ export function cloneElements(elements, { offsetX = 0, offsetY = 0 } = {}) {
 
     if (copy.containerId) {
       copy.containerId = idMap.get(copy.containerId) ?? null;
+    }
+    // A frame is just another element referenced by id. slate does not draw
+    // frames, so a dangling frameId is invisible here — it shows up when the
+    // file goes back to the original and the children have fallen out.
+    if (copy.frameId) {
+      copy.frameId = idMap.get(copy.frameId) ?? null;
     }
     if (Array.isArray(copy.boundElements)) {
       const kept = copy.boundElements

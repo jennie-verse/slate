@@ -167,8 +167,24 @@ export function keysBetween(lower, upper, count) {
 
 /** Ascending comparison usable directly by Array#sort. */
 export function compareIndex(a, b) {
-  const left = a.index ?? "";
-  const right = b.index ?? "";
+  const left = a.index;
+  const right = b.index;
+  const leftKeyed = typeof left === "string" && left !== "";
+  const rightKeyed = typeof right === "string" && right !== "";
+
+  // An element with NO key carries no ordering information, so the array it
+  // arrived in is the only order there is — and ensureIndices() is about to
+  // turn that order into keys. Treating a missing key as "" and then breaking
+  // the tie on id scrambles the whole set: a drawing that arrives without keys
+  // (an older Excalidraw export, a hand-written file) came out in a random
+  // order, front to back. Array.prototype.sort is stable, so returning 0 here
+  // keeps the caller's order intact.
+  if (!leftKeyed) return rightKeyed ? 1 : 0;      // unkeyed goes on top
+  if (!rightKeyed) return -1;
+
+  // Two elements that genuinely hold the SAME key still need a deterministic
+  // answer, and it has to be one two devices reach independently — hence the
+  // id, not the array position (Expansion_Plan 2-3).
   if (left === right) return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
   return left < right ? -1 : 1;
 }

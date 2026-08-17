@@ -45,11 +45,25 @@ test("delete is a tombstone, not a removal", () => {
   assert.equal(scene.get(a.id).isDeleted, true);
 });
 
-test("locked elements are not deleted", () => {
+test("the low-level delete removes a locked element, because it is also undo", () => {
+  // Stage 1 filtered locked elements out here. That made the inverse of `add`
+  // a no-op for anything locked: pasting or importing a locked shape and then
+  // pressing undo left it on the canvas, unselectable and unremovable, with the
+  // undo entry already spent. Protecting locked elements is the CALLER's job
+  // (app.deleteElements) — see the note in actions.js.
   const scene = new Scene([]);
   const a = scene.insert(rect({ locked: true }));
   apply(scene, Actions.delete([a.id]));
-  assert.equal(scene.get(a.id).isDeleted, false);
+  assert.equal(scene.get(a.id).isDeleted, true);
+});
+
+test("undoing the add of a locked element actually removes it", () => {
+  const scene = new Scene([]);
+  const history = new History(scene);
+  history.run(Actions.add([rect({ id: "locked-one", locked: true })]));
+  assert.equal(scene.visible().length, 1);
+  history.undo();
+  assert.equal(scene.visible().length, 0, "a locked element must not survive its own undo");
 });
 
 test("undo and redo restore exact field values", () => {

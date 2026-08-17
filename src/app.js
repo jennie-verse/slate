@@ -18,6 +18,7 @@ import {
 } from "./geometry.js";
 import {
   buildShell, toast, openDialog, confirmDialog, promptDialog, el, svgIcon, anyDialogOpen,
+  pickFile,
 } from "./ui.js";
 import { openContextMenu, contextMenuOpen } from "./contextmenu.js";
 import {
@@ -77,6 +78,12 @@ class SlateApp {
     this.draggingIds = null;
     this.fadingIds = null;
     this.board = null;
+    // Bumped the instant a board switch STARTS. Comparing board ids across an
+    // await is not enough: openBoard cancels, flushes and loads before it
+    // reassigns this.board, so an async insert finishing inside that window
+    // still sees the old id, writes into the scene that is being replaced, and
+    // the work disappears with it.
+    this.boardEpoch = 0;
     this.files = {};
     this.editing = null;
     this.saveTimer = null;
@@ -90,6 +97,7 @@ class SlateApp {
     this.snapToObjects = true;
     this.search = null;          // { query, matches, active }
     this.lastTap = null;
+    this.tapConsumed = false;
   }
 
   /* ------------------------------------------------------------- lifecycle */
@@ -161,7 +169,18 @@ class SlateApp {
     }
   }
 
-  async openBoard(id) {
+  async openBoard(id, { flush = true } = {}) {
+    this.boardEpoch += 1;
+    // Order matters. Cancel first so nothing is still writing, then flush, then
+    // swap: a debounced save (or an image insert that finished while the board
+    // list was open) is otherwise thrown away with the scene it belonged to.
+    this.cancelGesture();
+    // The textarea normally commits itself on blur when the dialog takes focus.
+    // Doing it explicitly does not depend on that: the half-typed label belongs
+    // to the board being left, and it has to be committed before the flush, not
+    // after the swap.
+    if (this.editing) this.commitText();
+    if (flush && this.board) await this.saveNow({ blocking: true });
     const loaded = await loadBoard(id);
     if (!loaded) return;
     this.board = loaded.meta;
@@ -447,7 +466,18 @@ class SlateApp {
 
   onPointerDown(event) {
     if (this.editing) this.commitText();
+    this.tapConsumed = false;
     this.activeTool.onPointerDown?.(this, event);
+  }
+
+  /**
+   * "That pointer-up was not a plain tap on the canvas."
+   * A handle drag, a marquee, a badge press and a real move all end in
+   * onPointerUp, and the double-tap detector cannot tell them apart on its own.
+   */
+  consumeTap() {
+    this.tapConsumed = true;
+    this.lastTap = null;
   }
 
   onPointerMove(event) {
@@ -505,6 +535,7 @@ class SlateApp {
   }
 
   duplicateSelection() {
+    if (this.refuseDuringGesture()) return;
     const elements = this.selectedElements();
     if (!elements.length) return;
     // cloneElements rewrites ids AND the relationships between them, so a
@@ -528,9 +559,53 @@ class SlateApp {
     return elements;
   }
 
-  /** Delete, taking labels with their hosts and cleaning up bindings. */
+  /**
+   * Delete, taking labels with their hosts and cleaning up bindings.
+   *
+   * Locked elements are skipped HERE rather than in actions.js: the low-level
+   * delete has to be able to remove anything, because it is also the inverse of
+   * `add` — see the note there.
+   */
+  /**
+   * The delete the user asked for — keyboard, property panel and context menu
+   * all arrive here. `deleteElements` below stays unguarded on purpose: the
+   * eraser is itself a gesture and calls it from inside one.
+   */
+  deleteSelection(ids = null) {
+    if (this.refuseDuringGesture()) return;
+    const list = (ids || [...this.selection]).filter((id) => {
+      const element = this.scene.get(id);
+      return element && !element.isDeleted;
+    });
+    if (!list.length) return;
+    this.deleteElements(list);
+    this.setSelection(new Set());
+  }
+
+  /** Arrow keys move elements exactly as a drag does, bound arrows and all. */
+  nudgeSelection(dx, dy) {
+    if (this.refuseDuringGesture()) return;
+    const ids = [...this.selection].filter((id) => this.scene.get(id));
+    if (!ids.length) return;
+    const changes = ids.map((id) => {
+      const element = this.scene.get(id);
+      return { x: element.x + dx, y: element.y + dy };
+    });
+    this.history.run(Actions.update(ids, changes));
+    // Nudging moves elements exactly like dragging does, so bound arrows and
+    // labels have to follow it too.
+    this.syncBindings(ids, { layout: true, merge: true });
+    this.markStatic();
+    this.requestRender();
+    this.scheduleSave();
+  }
+
   deleteElements(ids) {
-    const full = withBoundText(this.scene, ids);
+    const unlocked = [...ids].filter((id) => {
+      const element = this.scene.get(id);
+      return element && !element.isDeleted && !element.locked;
+    });
+    const full = withBoundText(this.scene, unlocked).filter((id) => !this.scene.get(id)?.locked);
     if (!full.length) return;
     const steps = [Actions.delete(full)];
 
@@ -645,10 +720,14 @@ class SlateApp {
   bindingCompanions(ids) {
     const moving = new Set(ids);
     const out = new Set();
-    for (const id of affectedArrowIds(this.scene, ids)) {
+    const arrows = affectedArrowIds(this.scene, ids);
+    for (const id of arrows) {
       if (!moving.has(id)) out.add(id);
     }
-    for (const id of withBoundText(this.scene, ids)) {
+    // Labels of the moved elements AND of the arrows that are about to follow
+    // them — an arrow label is re-centred on the arrow's new midpoint, so it
+    // has to be in the snapshot or undo leaves it floating where the arrow was.
+    for (const id of withBoundText(this.scene, [...ids, ...arrows])) {
       if (!moving.has(id)) out.add(id);
     }
     // A label's own geometry changes when its container resizes.
@@ -728,6 +807,10 @@ class SlateApp {
   }
 
   openLink(element) {
+    // A double tap on the badge is one intent, not two.
+    const now = Date.now();
+    if (this.lastLink && this.lastLink.id === element?.id && now - this.lastLink.at < 700) return;
+    this.lastLink = { id: element?.id, at: now };
     // Validated again here, not just when it was typed: the value may have
     // arrived from an imported file (search.js).
     const href = safeLink(element?.link);
@@ -776,6 +859,7 @@ class SlateApp {
   }
 
   groupSelection() {
+    if (this.refuseDuringGesture()) return;
     const ids = this.selectedElements()
       .filter((element) => !element.containerId)
       .map((element) => element.id);
@@ -794,6 +878,7 @@ class SlateApp {
   }
 
   ungroupSelection() {
+    if (this.refuseDuringGesture()) return;
     const ids = this.selectedElements().map((element) => element.id);
     const patch = ungroupPatch(this.scene, ids);
     if (!patch) {
@@ -804,6 +889,7 @@ class SlateApp {
   }
 
   setLocked(locked) {
+    if (this.refuseDuringGesture()) return;
     const ids = this.selectedElements().map((element) => element.id);
     const patch = lockPatch(this.scene, withBoundText(this.scene, ids), locked);
     if (!patch) return;
@@ -817,6 +903,7 @@ class SlateApp {
   }
 
   unlockAll() {
+    if (this.refuseDuringGesture()) return;
     const ids = this.scene.visible().filter((element) => element.locked).map((element) => element.id);
     if (!ids.length) {
       toast("Nothing on this board is locked.");
@@ -833,6 +920,7 @@ class SlateApp {
   }
 
   align(mode) {
+    if (this.refuseDuringGesture()) return;
     const ids = this.selectedElements().map((element) => element.id);
     const patch = alignPatch(this.scene, ids, mode);
     if (!patch) {
@@ -843,6 +931,7 @@ class SlateApp {
   }
 
   distribute(axis) {
+    if (this.refuseDuringGesture()) return;
     const ids = this.selectedElements().map((element) => element.id);
     const patch = distributePatch(this.scene, ids, axis);
     if (!patch) {
@@ -853,6 +942,7 @@ class SlateApp {
   }
 
   flip(axis) {
+    if (this.refuseDuringGesture()) return;
     const ids = this.selectedElements().map((element) => element.id);
     const patch = flipPatch(this.scene, withBoundText(this.scene, ids), axis);
     if (!patch) return;
@@ -862,13 +952,22 @@ class SlateApp {
   /* ----------------------------------------------------------- clipboard */
 
   async copySelection({ cut = false } = {}) {
+    if (cut && this.refuseDuringGesture()) return;
     const elements = this.selectedElements();
     if (!elements.length) return;
+    const boardAtCopy = this.boardEpoch;
     const full = withBoundText(this.scene, elements.map((element) => element.id))
       .map((id) => this.scene.get(id))
       .filter(Boolean);
     const where = await writeElements(full, this.files);
     if (cut) {
+      // Cut deletes AFTER an await. If the board changed underneath, deleting
+      // by id on the new board is at best a no-op and at worst the wrong
+      // elements — the copy already succeeded, so stop at that.
+      if (this.boardEpoch !== boardAtCopy) {
+        toast("The board changed while copying — the items were copied, not cut.", { tone: "warn" });
+        return;
+      }
       this.deleteElements(elements.map((element) => element.id));
       this.setSelection(new Set());
     }
@@ -878,9 +977,17 @@ class SlateApp {
   }
 
   async paste(at) {
+    if (this.refuseDuringGesture()) return;
+    const boardAtRead = this.boardEpoch;
     const payload = await readElements();
     if (!payload) {
       toast("Nothing to paste.", { tone: "warn" });
+      return;
+    }
+    // Reading the system clipboard can sit behind a permission prompt that
+    // leaves the page fully usable, so the board can change mid-read.
+    if (this.boardEpoch !== boardAtRead) {
+      toast("The board changed while the clipboard was being read — nothing was pasted.", { tone: "warn" });
       return;
     }
     const rect = this.dom.canvasHost.getBoundingClientRect();
@@ -964,16 +1071,29 @@ class SlateApp {
 
   /* -------------------------------------------------------------- images */
 
-  insertImageAt(x, y) {
-    const input = el("input", null, { type: "file", accept: IMAGE_ACCEPT });
-    input.style.display = "none";
-    document.body.appendChild(input);
-    input.addEventListener("change", async () => {
-      const file = input.files?.[0];
-      input.remove();
-      if (!file) { this.selectTool("selection"); return; }
+  async insertImageAt(x, y) {
+    const boardAtPick = this.boardEpoch;
+    const file = await pickFile({ accept: IMAGE_ACCEPT });
+    if (!file) { this.selectTool("selection"); return; }
+    // The picker is async and the user can switch boards while it is open —
+    // dropping the photo onto whatever board happens to be open now would put
+    // it somewhere they never chose.
+    if (this.boardEpoch !== boardAtPick) {
+      toast("The board changed while the picker was open — the image was not added.", { tone: "warn" });
+      this.selectTool("selection");
+      return;
+    }
+    {
       try {
         const result = await readImageFile(file);
+        // Decoding, downscaling and hashing a phone photo takes long enough for
+        // a board switch to land in the middle of it — the picker guard above
+        // only covers the wait before this one.
+        if (this.boardEpoch !== boardAtPick) {
+          toast("The board changed while the image was being prepared — it was not added.", { tone: "warn" });
+          this.selectTool("selection");
+          return;
+        }
         this.files = { ...this.files, [result.fileId]: result.entry };
         setFileSource(this.files);
         const element = createImageElement({
@@ -997,8 +1117,7 @@ class SlateApp {
         toast(message, { tone: "error", timeout: 7000 });
         this.selectTool("selection");
       }
-    });
-    input.click();
+    }
   }
 
   /**
@@ -1039,8 +1158,10 @@ class SlateApp {
     this.editing = { element, textarea, isNew, container: host, composing: false };
 
     // Korean IME: while composing, Enter and Escape belong to the IME.
-    textarea.addEventListener("compositionstart", () => { this.editing.composing = true; });
-    textarea.addEventListener("compositionend", () => { this.editing.composing = false; });
+    // These can fire AFTER commitText() has already cleared this.editing —
+    // blurring mid-composition does exactly that — so they must not assume it.
+    textarea.addEventListener("compositionstart", () => { if (this.editing) this.editing.composing = true; });
+    textarea.addEventListener("compositionend", () => { if (this.editing) this.editing.composing = false; });
     textarea.addEventListener("input", () => this.positionEditor());
     textarea.addEventListener("keydown", (event) => {
       if (event.isComposing || event.keyCode === 229 || this.editing?.composing) return;
@@ -1132,9 +1253,10 @@ class SlateApp {
     }
 
     if (!text.trim()) {
-      // An empty text element is invisible and unselectable — remove it rather
-      // than leaving a trap on the canvas.
-      this.history.run(Actions.delete([element.id]));
+      // A new element was never added, so there is nothing to take back. An
+      // existing one that has been emptied is removed: an invisible,
+      // unselectable text element is a trap on the canvas.
+      if (!isNew) this.history.run(Actions.delete([element.id]));
     } else {
       const ctx = this.renderer.layers.static.ctx;
       ctx.save();
@@ -1153,7 +1275,7 @@ class SlateApp {
         height: Math.ceil(height),
       };
       if (isNew) {
-        this.history.runSilent(Actions.update([element.id], changes));
+        this.history.run(Actions.add([{ ...element, ...changes }]));
       } else {
         this.history.run(Actions.update([element.id], changes));
       }
@@ -1167,7 +1289,16 @@ class SlateApp {
 
   /** The label branch of commitText — wrapping, and growing the host to fit. */
   commitBoundText({ element, isNew, container }, text) {
-    const host = this.scene.get(container.id) || container;
+    const host = this.scene.get(container.id);
+    // The host can be deleted while its label is being typed. Adding the label
+    // anyway leaves a text element pointing at a tombstone: elementAt() skips
+    // past it, so it can never be selected, moved or deleted again.
+    if (!host || host.isDeleted) {
+      if (!isNew) this.history.run(Actions.delete([element.id]));
+      this.markStatic();
+      this.requestRender();
+      return;
+    }
     const emptied = !text.trim();
 
     if (isNew && emptied) {
@@ -1415,15 +1546,25 @@ class SlateApp {
     const name = await promptDialog({
       title: "Save to library", label: "Name (optional)", value: "", confirmLabel: "Save",
     });
+    // null is Cancel; "" is Save with the name left blank, which is allowed
+    // here. They were the same value until promptDialog learned to tell them
+    // apart, so Cancel used to save an unnamed item.
+    if (name === null) return;
     const items = await loadLibrary();
-    await saveLibrary([makeItem(elements, name || ""), ...items]);
+    await saveLibrary([makeItem(elements, name || "", this.files), ...items]);
     toast("Saved to the library.");
   }
 
   insertLibraryItem(item) {
     const rect = this.dom.canvasHost.getBoundingClientRect();
     const [cx, cy] = screenToWorld(rect.width / 2, rect.height / 2, this.viewport);
-    const elements = instantiate(item, cx, cy);
+    const { elements, files } = instantiate(item, cx, cy);
+    // Images are stored per board, so an item carrying one has to bring its
+    // bytes across or it lands as an empty frame.
+    if (files && Object.keys(files).length) {
+      this.files = { ...this.files, ...files };
+      setFileSource(this.files);
+    }
     this.addElements(elements);
     this.setSelection(new Set(elements.filter((element) => !element.containerId).map((element) => element.id)));
     toast(`Inserted ${elements.length} element${elements.length === 1 ? "" : "s"}.`);
@@ -1435,14 +1576,10 @@ class SlateApp {
     toast("Library exported.");
   }
 
-  importLibrary() {
-    const input = el("input", null, { type: "file", accept: ".excalidrawlib,application/json,.json" });
-    input.style.display = "none";
-    document.body.appendChild(input);
-    input.addEventListener("change", async () => {
-      const file = input.files?.[0];
-      input.remove();
-      if (!file) return;
+  async importLibrary() {
+    const file = await pickFile({ accept: ".excalidrawlib,application/json,.json" });
+    if (!file) return;
+    {
       try {
         const incoming = parseLibraryFile(await file.text());
         const existing = await loadLibrary();
@@ -1453,8 +1590,7 @@ class SlateApp {
         const message = error instanceof LibraryError ? error.message : "Could not read that library file.";
         toast(message, { tone: "error", timeout: 7000 });
       }
-    });
-    input.click();
+    }
   }
 
   /* -------------------------------------------------------- context menu */
@@ -1509,10 +1645,7 @@ class SlateApp {
         label: "Delete",
         hint: "⌫",
         danger: true,
-        onSelect: () => {
-          this.deleteElements(selected.map((element) => element.id));
-          this.setSelection(new Set());
-        },
+        onSelect: () => this.deleteSelection(selected.map((element) => element.id)),
       });
     } else {
       items.push({ separator: true });
@@ -1525,6 +1658,7 @@ class SlateApp {
   }
 
   reorderSelection(to) {
+    if (this.refuseDuringGesture()) return;
     const ids = this.selectedElements().map((element) => element.id);
     if (!ids.length) return;
     this.history.run(Actions.reorder(ids, to));
@@ -1563,6 +1697,7 @@ class SlateApp {
 
   /** Double tap: edit a label, or start one on a shape that has none. */
   handleDoubleTap(event) {
+    if (this.tapConsumed) return false;
     if (this.activeTool.id !== "selection" || this.editing) return false;
     const now = Date.now();
     const previous = this.lastTap;
@@ -1670,11 +1805,9 @@ class SlateApp {
     if (meta) return;
 
     if (event.key === "Delete" || event.key === "Backspace") {
-      const ids = [...this.selection];
-      if (!ids.length) return;
+      if (!this.selection.size) return;
       event.preventDefault();
-      this.deleteElements(ids);
-      this.setSelection(new Set());
+      this.deleteSelection();
       return;
     }
     if (event.key === "Escape") {
@@ -1713,20 +1846,10 @@ class SlateApp {
     if (["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"].includes(event.key) && this.selection.size) {
       event.preventDefault();
       const step = event.shiftKey ? 20 : 2;
-      const dx = event.key === "ArrowLeft" ? -step : event.key === "ArrowRight" ? step : 0;
-      const dy = event.key === "ArrowUp" ? -step : event.key === "ArrowDown" ? step : 0;
-      const ids = [...this.selection];
-      const changes = ids.map((id) => {
-        const element = this.scene.get(id);
-        return { x: element.x + dx, y: element.y + dy };
-      });
-      this.history.run(Actions.update(ids, changes));
-      // Nudging with the keyboard moves elements exactly like dragging does, so
-      // bound arrows and labels have to follow it too.
-      this.syncBindings(ids, { layout: true, merge: true });
-      this.markStatic();
-      this.requestRender();
-      this.scheduleSave();
+      this.nudgeSelection(
+        event.key === "ArrowLeft" ? -step : event.key === "ArrowRight" ? step : 0,
+        event.key === "ArrowUp" ? -step : event.key === "ArrowDown" ? step : 0,
+      );
       return;
     }
 
@@ -1743,7 +1866,54 @@ class SlateApp {
     }
   }
 
+  /** A finger is down: a drag, a stroke, a marquee or an eraser sweep is live. */
+  gestureInFlight() {
+    return this.input?.activePointerId !== null
+      || !!this.draggingIds || !!this.draft || !!this.selectionBox || !!this.fadingIds;
+  }
+
+  /**
+   * Refuse a command because a gesture is running, and say why.
+   *
+   * Anything that changes geometry has to bow out: the drag in progress
+   * rewrites the same elements from its own `before` snapshot on the very next
+   * pointermove, so the command is silently undone — and the undo entry it
+   * recorded restores a mid-drag position the user never chose. Two hands on an
+   * iPad make this ordinary, not an edge case: the property panel and the
+   * context menu sit outside the canvas, so tapping them never interrupts the
+   * finger that is still dragging.
+   */
+  refuseDuringGesture() {
+    if (!this.gestureInFlight()) return false;
+    toast("Finish the drag first.", { tone: "warn" });
+    return true;
+  }
+
+  /**
+   * Abort whatever the finger is doing, right now.
+   *
+   * Switching board saves the current one and then replaces `scene` and
+   * `history`. A gesture straddling that swap commits its stroke into the NEXT
+   * board's history, and persists the old board at whatever half-dragged
+   * position it had reached — permanently, because the undo entry that would
+   * take it back landed on the wrong board. The long-press menu already does
+   * this; every path that replaces the scene needs it too.
+   */
+  cancelGesture() {
+    if (!this.gestureInFlight()) return;
+    if (this.input?.activePointerId !== null) this.input.cancelActive();
+    else this.activeTool?.onCancel?.(this);
+    this.setDragging(null);
+    this.setSelectionBox(null);
+    this.setSnapGuides(null);
+    this.setDraft(null);
+  }
+
   undo() {
+    // Undoing under a live gesture is incoherent and destructive: the drag goes
+    // on mutating the element that was just deleted, and the record() on
+    // release throws away the redo entry that would have brought it back.
+    if (this.gestureInFlight()) return;
     if (!this.history.canUndo) return;
     this.history.undo();
     this.pruneSelection();
@@ -1754,6 +1924,7 @@ class SlateApp {
   }
 
   redo() {
+    if (this.gestureInFlight()) return;
     if (!this.history.canRedo) return;
     this.history.redo();
     this.pruneSelection();
@@ -1835,13 +2006,15 @@ class SlateApp {
   }
 
   async newBoard() {
+    this.cancelGesture();
     const title = await promptDialog({ title: "New board", label: "Board name", value: "Untitled", confirmLabel: "Create" });
-    if (!title) return;
+    if (title === null) return;
+    const name = title.trim() || "Untitled";
     await this.saveNow();
-    const meta = await createBoard(title);
+    const meta = await createBoard(name);
     await this.openBoard(meta.id);
     this.refreshProps();
-    toast(`Created "${title}".`);
+    toast(`Created "${name}".`);
   }
 
   async renameCurrentBoard() {
@@ -1853,6 +2026,9 @@ class SlateApp {
   }
 
   async openBoardList() {
+    // Before saveNow, not after: a live drag would otherwise be written to disk
+    // at an arbitrary mid-drag point, with no undo entry left to take it back.
+    this.cancelGesture();
     await this.saveNow();
     const boards = await listBoards();
     const estimate = await storageEstimate();
@@ -1897,8 +2073,10 @@ class SlateApp {
             close();
             if (board.id === this.board?.id) {
               const rest = await listBoards();
-              if (rest.length) await this.openBoard(rest[0].id);
-              else await this.openBoard((await createBoard("Untitled")).id);
+              // flush: false — the current board has just been deleted, and
+              // saving it on the way out would put it straight back.
+              if (rest.length) await this.openBoard(rest[0].id, { flush: false });
+              else await this.openBoard((await createBoard("Untitled")).id, { flush: false });
               this.refreshProps();
             }
             toast(`Deleted "${board.title}".`);
@@ -2110,22 +2288,22 @@ class SlateApp {
     toast("Exported .excalidraw — it opens on excalidraw.com.");
   }
 
-  importExcalidraw() {
-    const input = el("input", null, { type: "file", accept: ".excalidraw,application/json,.json" });
-    input.style.display = "none";
-    document.body.appendChild(input);
-    input.addEventListener("change", async () => {
-      const file = input.files?.[0];
-      input.remove();
-      if (!file) return;
+  async importExcalidraw() {
+    const file = await pickFile({ accept: ".excalidraw,application/json,.json" });
+    if (!file) return;
+    {
       try {
         const parsed = parseExcalidrawFile(await file.text());
         if (!parsed.elements.length) {
           toast("That drawing has no elements.", { tone: "warn" });
           return;
         }
-        // New ids so an import can never collide with what is already here.
-        const incoming = parsed.elements.map((element) => ({ ...element, id: newId(), index: null }));
+        // New ids so an import can never collide with what is already here —
+        // but the RELATIONSHIPS have to be rewritten to match, or every label,
+        // arrow binding and group in the imported file points at a dead id and
+        // the drawing silently comes apart (model.js). `keepSeed` leaves the
+        // hand-drawn wobble exactly as it was in the file.
+        const incoming = cloneElements(parsed.elements, { keepSeed: true });
         this.history.run(Actions.add(incoming));
         // The files map rides along untouched. Stage 1 cannot draw images, but
         // dropping them would delete photos from the user's own file on the
@@ -2147,8 +2325,7 @@ class SlateApp {
         const message = error instanceof ImportError ? error.message : "Could not read that file.";
         toast(message, { tone: "error", timeout: 7000 });
       }
-    });
-    input.click();
+    }
   }
 
   async doBackup() {
@@ -2161,14 +2338,10 @@ class SlateApp {
     }
   }
 
-  doRestore() {
-    const input = el("input", null, { type: "file", accept: "application/json,.json" });
-    input.style.display = "none";
-    document.body.appendChild(input);
-    input.addEventListener("change", async () => {
-      const file = input.files?.[0];
-      input.remove();
-      if (!file) return;
+  async doRestore() {
+    const file = await pickFile({ accept: "application/json,.json" });
+    if (!file) return;
+    {
       const text = await file.text();
       const replace = await confirmDialog({
         title: "Restore backup",
@@ -2194,8 +2367,7 @@ class SlateApp {
           : "Could not restore that file.";
         toast(message, { tone: "error", timeout: 9000 });
       }
-    });
-    input.click();
+    }
   }
 
   async resetCanvas() {
@@ -2204,9 +2376,15 @@ class SlateApp {
       toast("This board is already empty.");
       return;
     }
+    const locked = this.scene.visible().filter((element) => element.locked).length;
     const ok = await confirmDialog({
       title: "Reset this canvas",
-      message: `Delete all ${ids.length} elements on "${this.board?.title}"? You can undo this straight afterwards.`,
+      // Reset takes locked elements too — it is an explicit, confirmed action,
+      // and leaving them behind after saying "all" would be a lie. The message
+      // names them so it is not a surprise.
+      message: `Delete all ${ids.length} elements on "${this.board?.title}"?`
+        + (locked ? ` This includes ${locked} locked one${locked === 1 ? "" : "s"}.` : "")
+        + " You can undo this straight afterwards.",
       confirmLabel: "Delete all",
       danger: true,
     });

@@ -60,7 +60,9 @@ export const textTool = {
       width: 0,
       height: (app.style.fontSize || 20) * 1.25,
     });
-    app.addElements([element]);
+    // Not added to the scene yet. Tapping and typing nothing must leave no
+    // element and no undo step — adding first and deleting on cancel costs two
+    // undo presses and leaves an invisible zero-width element behind.
     app.editText(element, { isNew: true });
   },
 

@@ -31,28 +31,37 @@ export function apply(scene, action) {
     }
 
     case "update": {
-      const ids = action.elementIds;
       const before = [];
+      // Ids that were actually there. Skipping a missing element but keeping it
+      // in the inverse would leave elementIds and changes different lengths, and
+      // the undo would then read changes[i] for the wrong element — or undefined.
+      const applied = [];
       const changesFor = (index) => (Array.isArray(action.changes) ? action.changes[index] : action.changes);
-      ids.forEach((id, index) => {
+      action.elementIds.forEach((id, index) => {
         const element = scene.get(id);
         if (!element) return;
         const changes = changesFor(index);
         const previous = {};
         for (const key of Object.keys(changes)) previous[key] = clone(element[key]);
+        applied.push(id);
         before.push(previous);
         scene.patch(id, clone(changes));
       });
       return {
-        ids,
-        undo: { type: "update", elementIds: ids, changes: before },
+        ids: applied,
+        undo: { type: "update", elementIds: applied, changes: before },
       };
     }
 
     case "delete": {
+      // Deliberately NOT filtering locked elements here. This is the inverse of
+      // `add`, so refusing to delete a locked element would make undoing the
+      // paste of a locked shape a no-op — and leave something on the canvas that
+      // cannot be selected or removed. Whether the USER may delete a locked
+      // element is a decision for the caller (app.deleteElements).
       const ids = action.elementIds.filter((id) => {
         const element = scene.get(id);
-        return element && !element.isDeleted && !element.locked;
+        return element && !element.isDeleted;
       });
       for (const id of ids) scene.remove(id);
       return { ids, undo: { type: "restore", elementIds: ids } };

@@ -10,7 +10,7 @@ import assert from "node:assert/strict";
 
 import { Scene } from "../src/scene.js";
 import { History } from "../src/history.js";
-import { Actions } from "../src/actions.js";
+import { Actions, apply } from "../src/actions.js";
 import { createElement, cloneElements, ARROWHEADS } from "../src/model.js";
 import {
   bindingPatchFor, bindingUpdates, affectedArrowIds, bindableAt, focusFor, gapFor, bindingPoint,
@@ -22,8 +22,8 @@ import {
 import { objectSnap, snapValue, gridOffset } from "../src/snapping.js";
 import { findMatches, safeLink, normaliseLinkInput } from "../src/search.js";
 import { arrowheadShape } from "../src/shapes.js";
-import { STYLE_KEYS } from "../src/clipboard.js";
-import { normalise, makeItem, parseFile, toFile } from "../src/library.js";
+import { STYLE_KEYS, materialise } from "../src/clipboard.js";
+import { normalise, makeItem, instantiate, parseFile, toFile } from "../src/library.js";
 
 /** Monospace-ish stand-in so the pure modules can be measured without a canvas. */
 const measure = (line, element) => String(line).length * ((element?.fontSize || 20) * 0.5);
@@ -457,4 +457,160 @@ test("mergeIntoLast is a no-op when there is nothing to merge into", () => {
   history.clear();
   assert.equal(history.mergeIntoLast({ type: "update", elementIds: [], changes: {} }, null), false);
   assert.equal(history.undoStack.length, 0);
+});
+
+/* --------------------------------------------------- second review pass */
+
+test("importing rewrites relationships, not just ids", () => {
+  // Fresh ids without remapping containerId / boundElements / bindings leaves
+  // every relationship in the imported file pointing at a dead id: the label
+  // stops following its box, the arrow stops following anything, and the box
+  // can never be labelled again because boundTextIdOf keeps finding the corpse.
+  const box = createElement("rectangle", { id: "box", x: 0, y: 0, width: 100, height: 60 });
+  const label = createElement("text", { id: "label", containerId: "box", text: "x", originalText: "x" });
+  const arrow = createElement("arrow", {
+    id: "arrow", points: [[0, 0], [50, 0]],
+    endBinding: { elementId: "box", focus: 0, gap: 4 },
+  });
+  box.boundElements = [{ id: "label", type: "text" }, { id: "arrow", type: "arrow" }];
+
+  const imported = cloneElements([box, label, arrow], { keepSeed: true });
+  const [newBox, newLabel, newArrow] = imported;
+
+  assert.notEqual(newBox.id, "box", "ids must be fresh so an import cannot collide");
+  assert.equal(newLabel.containerId, newBox.id);
+  assert.equal(newArrow.endBinding.elementId, newBox.id);
+  assert.deepEqual(
+    newBox.boundElements.map((entry) => entry.id).sort(),
+    [newLabel.id, newArrow.id].sort(),
+  );
+  assert.equal(newBox.seed, box.seed, "an import must render the way the file did");
+});
+
+test("duplicating still re-seeds, so two copies do not look identical", () => {
+  const box = createElement("rectangle", { x: 0, y: 0, width: 10, height: 10 });
+  assert.notEqual(cloneElements([box])[0].seed, box.seed);
+});
+
+test("update skips missing ids without desyncing its own inverse", () => {
+  // A stale id in elementIds used to leave `changes` shorter than `elementIds`,
+  // so the undo read changes[i] for the wrong element — or for undefined.
+  const box = createElement("rectangle", { x: 0, y: 0, width: 10, height: 10 });
+  const { scene } = sceneWith(box);
+  const result = apply(scene, Actions.update(["ghost", box.id], [{ x: 1 }, { x: 50 }]));
+  assert.deepEqual(result.ids, [box.id]);
+  assert.equal(result.undo.elementIds.length, result.undo.changes.length);
+  assert.doesNotThrow(() => apply(scene, result.undo));
+  assert.equal(scene.get(box.id).x, 0);
+});
+
+test("a whitespace-only line survives wrapping", () => {
+  // It used to fall through every branch and vanish, shifting the rest up.
+  const lines = wrapText("a\n     \nb", 30, (line) => measure(line, { fontSize: 20 }));
+  assert.equal(lines.length, 3, `expected 3 lines, got ${JSON.stringify(lines)}`);
+  assert.equal(lines[0], "a");
+  assert.equal(lines[2], "b");
+});
+
+test("a library item carries the bytes of the images inside it", () => {
+  const image = createElement("image", { fileId: "sha1", x: 0, y: 0, width: 40, height: 40 });
+  const files = { sha1: { id: "sha1", mimeType: "image/png", dataURL: "data:image/png;base64,AA" } };
+  const item = makeItem([image], "photo", files);
+  assert.equal(item.files.sha1.dataURL, files.sha1.dataURL);
+
+  const placed = instantiate(item, 100, 100);
+  assert.equal(placed.elements[0].fileId, "sha1");
+  assert.equal(placed.files.sha1.dataURL, files.sha1.dataURL, "the bytes must travel to the new board");
+
+  // And they survive the file format.
+  const back = parseFile(JSON.stringify(toFile([item])));
+  assert.equal(back[0].files.sha1.dataURL, files.sha1.dataURL);
+});
+
+test("an imported library item lands where it was aimed, not where it was drawn", () => {
+  // makeItem normalises an item to the origin; parseFile cannot — a file from
+  // excalidraw.com keeps the coordinates its shapes were drawn at, because the
+  // original re-offsets by the bounding box at INSERT time instead. instantiate
+  // assumed the normalised case, so an item drawn at (1200, 900) was inserted
+  // 1200px past the tap: off-screen, looking like nothing happened at all.
+  const far = {
+    type: "excalidrawlib", version: 2, source: "https://excalidraw.com",
+    libraryItems: [{
+      id: "a", status: "published", name: "n", created: 1,
+      elements: [{ id: "e", type: "rectangle", x: 1200, y: 900, width: 100, height: 60 }],
+    }],
+  };
+  const [item] = parseFile(JSON.stringify(far));
+  const placed = instantiate(item, 500, 400);
+  assert.equal(placed.elements[0].x, 450, "centred on the point, whatever the stored coordinates");
+  assert.equal(placed.elements[0].y, 370);
+
+  // A locally saved item is normalised already, so nothing changes for it.
+  const local = makeItem([createElement("rectangle", { x: 40, y: 40, width: 100, height: 60 })], "local");
+  const here = instantiate(local, 500, 400);
+  assert.equal(here.elements[0].x, 450);
+  assert.equal(here.elements[0].y, 370);
+});
+
+test("pasting from another app does not resurrect its deletions", () => {
+  // Copying from excalidraw.com puts a raw element array on the system
+  // clipboard, tombstones included. cloneElements clears isDeleted on every
+  // copy — that is what makes paste work — so materialise has to filter first.
+  const live = createElement("rectangle", { x: 0, y: 0, width: 10, height: 10 });
+  const dead = createElement("rectangle", { x: 20, y: 0, width: 10, height: 10 });
+  dead.isDeleted = true;
+  const copies = materialise([live, dead], { offsetX: 0, offsetY: 0 });
+  assert.equal(copies.length, 1);
+  assert.equal(copies.filter((element) => !element.isDeleted).length, 1);
+});
+
+test("cloning rewrites frame membership like every other relationship", () => {
+  // frameId was the one id-bearing field cloneElements left alone. slate does
+  // not draw frames, so nothing looks wrong here — the loss only surfaces when
+  // the file goes back to excalidraw.com and the children have fallen out.
+  const frame = createElement("rectangle", { x: 0, y: 0, width: 200, height: 200 });
+  frame.type = "frame";
+  const child = createElement("rectangle", { x: 20, y: 20, width: 40, height: 40 });
+  child.frameId = frame.id;
+
+  const [frameCopy, childCopy] = cloneElements([frame, child]);
+  assert.notEqual(frameCopy.id, frame.id);
+  assert.equal(childCopy.frameId, frameCopy.id, "the child must follow its own copy of the frame");
+
+  // Copied without its frame, the reference is dropped rather than left dangling.
+  const [alone] = cloneElements([child]);
+  assert.equal(alone.frameId, null);
+});
+
+test("a library file written by the original still opens", () => {
+  // No `files` key at all — an item from excalidraw.com simply has no images.
+  const original = {
+    type: "excalidrawlib", version: 2, source: "https://excalidraw.com",
+    libraryItems: [{ id: "a", status: "published", name: "n", created: 1, elements: [{ id: "e", type: "rectangle" }] }],
+  };
+  const back = parseFile(JSON.stringify(original));
+  assert.equal(back.length, 1);
+  assert.deepEqual(back[0].files, {});
+});
+
+test("elements with no order key keep the order they arrived in", () => {
+  // compareIndex used to read a missing key as "" and then break the tie on id,
+  // which sorts a whole unkeyed file into RANDOM front-to-back order. A drawing
+  // exported by an Excalidraw old enough to predate fractional indexing arrives
+  // exactly like that.
+  const given = [0, 1, 2, 3, 4, 5].map((x) => createElement("rectangle", { x, width: 10, height: 10 }));
+  const scene = new Scene(given);
+  assert.deepEqual(scene.visible().map((element) => element.x), [0, 1, 2, 3, 4, 5]);
+  // and it survives the save/load round trip that assigns the keys
+  assert.deepEqual(new Scene(scene.toJSON()).visible().map((element) => element.x), [0, 1, 2, 3, 4, 5]);
+});
+
+test("keyed elements still sort by key, and ties still break on id", () => {
+  const keyed = [
+    createElement("rectangle", { id: "b", x: 2, index: "a1" }),
+    createElement("rectangle", { id: "a", x: 1, index: "a1" }),
+    createElement("rectangle", { id: "c", x: 0, index: "a0" }),
+  ];
+  // a0 first; then the two a1s in id order — the same answer on any device.
+  assert.deepEqual(new Scene(keyed).visible().map((element) => element.id), ["c", "a", "b"]);
 });

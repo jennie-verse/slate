@@ -516,10 +516,9 @@ export function renderProps(container, app) {
         }
         const remove = optionButton({
           label: "Delete", title: "Delete", active: false, wide: true,
-          onSelect: () => {
-            app.deleteElements(ids);
-            app.setSelection(new Set());
-          },
+          // deleteSelection, not deleteElements: the panel sits outside the
+          // canvas, so tapping it never interrupts a drag that is still running.
+          onSelect: () => app.deleteSelection(ids),
         });
         remove.classList.add("is-danger");
         row.appendChild(remove);

@@ -44,23 +44,52 @@ export function normalise(elements) {
   }));
 }
 
-export function makeItem(elements, name) {
+/**
+ * @param {object[]} elements
+ * @param {string} name
+ * @param {object} files the board's image map — only the entries this item
+ *   actually references are copied in
+ *
+ * The original's library format has no place for images, so an item saved
+ * there loses them. Saving the bytes alongside is an extension: another app
+ * ignores the extra `files` key, and slate reads it back. The alternative is
+ * an item that renders as a broken frame on every board but the one it was
+ * saved from, which is data loss dressed up as a feature.
+ */
+export function makeItem(elements, name, files = {}) {
+  const kept = normalise(elements);
+  const used = {};
+  for (const element of kept) {
+    if (element.fileId && files[element.fileId]) used[element.fileId] = files[element.fileId];
+  }
   return {
     id: newId(),
     status: "unpublished",
     name: name || "",
     created: Date.now(),
-    elements: normalise(elements),
+    elements: kept,
+    files: used,
   };
 }
 
-/** Fresh ids and relationships rewritten, then placed at a point. */
+/**
+ * Fresh ids and relationships rewritten, then placed at a point.
+ * @returns {{elements:object[], files:object}} the files must be merged into
+ *   the target board, or an item with a photo in it arrives as a blank frame.
+ */
 export function instantiate(item, x, y) {
-  const box = boundsOfMany(item.elements) || { width: 0, height: 0 };
-  return cloneElements(item.elements, {
-    offsetX: x - box.width / 2,
-    offsetY: y - box.height / 2,
-  });
+  const box = boundsOfMany(item.elements) || { x: 0, y: 0, width: 0, height: 0 };
+  return {
+    elements: cloneElements(item.elements, {
+      // box.x/box.y are subtracted rather than assumed to be zero. makeItem
+      // normalises to the origin, but parseFile cannot: an .excalidrawlib
+      // written by the original keeps the coordinates its shapes were drawn at,
+      // and ignoring them dropped every imported item outside the viewport.
+      offsetX: x - box.width / 2 - (box.x || 0),
+      offsetY: y - box.height / 2 - (box.y || 0),
+    }),
+    files: item.files || {},
+  };
 }
 
 export function toFile(items) {
@@ -74,6 +103,7 @@ export function toFile(items) {
       name: item.name || "",
       created: item.created || Date.now(),
       elements: item.elements,
+      files: item.files || {},
     })),
   };
 }
@@ -103,6 +133,9 @@ export function parseFile(text) {
       name: entry?.name || "",
       created: entry?.created || Date.now(),
       elements: elements.map((element) => ({ ...element })),
+      // Absent in a file written by the original — an item from there simply
+      // has no images to carry.
+      files: (!Array.isArray(entry) && entry?.files) || {},
     });
   }
   if (!items.length) throw new LibraryError("That library has no shapes in it.");

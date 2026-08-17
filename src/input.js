@@ -39,6 +39,10 @@ export class InputManager {
     surface.addEventListener("contextmenu", (event) => {
       event.preventDefault();
       this.cancelLongPress();
+      // Same reason as the long-press path below: a right click can arrive with
+      // the button still down mid-drag, and every menu item would then race the
+      // drag that goes on writing over it.
+      this.cancelActive();
       const world = this.toWorldEvent(event);
       this.app.openContextMenu(world, { clientX: event.clientX, clientY: event.clientY });
     });

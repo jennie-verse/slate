@@ -190,14 +190,17 @@ export function promptDialog({ title, label, value = "", confirmLabel = "Save" }
         const row = el("div", "dialog-actions");
         const cancel = el("button", "button", { type: "button", text: "Cancel" });
         const confirm = el("button", "button button-primary", { type: "button", text: confirmLabel });
+        // null means cancelled, a string means confirmed — including "".
+        // Collapsing an empty box to null made Cancel and "Save with no name"
+        // indistinguishable, so callers could not honour Cancel at all.
         const done = (result) => { settled = true; close(); resolve(result); };
         cancel.addEventListener("click", () => done(null));
-        confirm.addEventListener("click", () => done(input.value.trim() || null));
+        confirm.addEventListener("click", () => done(input.value.trim()));
         // Enter must not commit while a Korean IME is still composing.
         input.addEventListener("keydown", (event) => {
           if (event.key === "Enter" && !event.isComposing && event.keyCode !== 229) {
             event.preventDefault();
-            done(input.value.trim() || null);
+            done(input.value.trim());
           }
         });
         row.appendChild(cancel);
@@ -206,6 +209,47 @@ export function promptDialog({ title, label, value = "", confirmLabel = "Save" }
       },
       onClose: () => { if (!settled) resolve(null); },
     });
+  });
+}
+
+/* -------------------------------------------------------------- file picker */
+
+/**
+ * Open the system file picker once and resolve with the chosen file, or null.
+ *
+ * The cleanup is the point. iOS Safari fires NO event when a picker is
+ * cancelled, so an `<input type=file>` appended on every tap and removed only
+ * in its `change` handler accumulates in the DOM — along with the closure it
+ * captures — for the rest of the session. The window regaining focus is the
+ * only signal a cancel gives, and it can arrive just before `change` does, so
+ * the check is deferred and skipped when a file is actually there.
+ */
+export function pickFile({ accept } = {}) {
+  return new Promise((resolve) => {
+    const input = el("input", null, { type: "file", accept });
+    input.style.display = "none";
+    document.body.appendChild(input);
+
+    let settled = false;
+    const finish = (file) => {
+      if (settled) return;
+      settled = true;
+      window.removeEventListener("focus", onFocus);
+      input.remove();
+      resolve(file || null);
+    };
+    function onFocus() {
+      setTimeout(() => {
+        if (input.files && input.files.length) return;   // change is on its way
+        finish(null);
+      }, 1500);
+    }
+
+    input.addEventListener("change", () => finish(input.files?.[0] || null));
+    window.addEventListener("focus", onFocus);
+    // Last resort: never leave one attached, even if focus never fires.
+    setTimeout(() => finish(input.files?.[0] || null), 180000);
+    input.click();
   });
 }
 

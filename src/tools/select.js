@@ -22,7 +22,10 @@ import { Actions } from "../actions.js";
 import { expandSelection, outerGroupId } from "../arrange.js";
 import { objectSnap, snapCandidates } from "../snapping.js";
 
-const DRAG_KEYS = ["x", "y", "width", "height", "angle", "points"];
+// `text` is here because resizing a container re-WRAPS its label: the wrapped
+// string changes as part of the drag, so leaving it out of the snapshot means
+// undo restores the box's size and keeps the new line breaks.
+const DRAG_KEYS = ["x", "y", "width", "height", "angle", "points", "text"];
 
 function selectedElements(app) {
   return [...app.selection].map((id) => app.scene.get(id)).filter((e) => e && !e.isDeleted);
@@ -75,6 +78,7 @@ export const selectTool = {
           before: elements.map((element) => ({ ...element })),
           ids: elements.map((element) => element.id),
           extraIds: app.bindingCompanions(elements.map((element) => element.id)),
+          moved: false,
         };
         this.state.extraBefore = this.state.extraIds.map((id) => snapshot(app.scene.get(id)));
         app.setDragging([...this.state.ids, ...this.state.extraIds]);
@@ -166,6 +170,7 @@ export const selectTool = {
     }
 
     if (state.mode === "resize") {
+      state.moved = true;
       const keepAspect = event.shiftKey;
       const changes = state.before.map((element) => {
         if (state.ids.length === 1) {
@@ -194,6 +199,7 @@ export const selectTool = {
     }
 
     if (state.mode === "rotate") {
+      state.moved = true;
       const cx = state.startBox.x + state.startBox.width / 2;
       const cy = state.startBox.y + state.startBox.height / 2;
       let angle = Math.atan2(event.y - cy, event.x - cx) + Math.PI / 2;
@@ -250,6 +256,9 @@ export const selectTool = {
     if (!state) return;
 
     if (state.mode === "link") {
+      // Grabbing a badge is not a tap on the canvas: letting the double-tap
+      // detector see it too opens the link twice AND starts a label editor.
+      app.consumeTap();
       if (app.linkBadgeAtPoint(event?.x ?? 0, event?.y ?? 0)?.id === state.target?.id) {
         app.openLink(state.target);
       }
@@ -259,11 +268,17 @@ export const selectTool = {
       app.requestRender();
       return;
     }
-    if (state.mode === "move" && !state.moved) {
+    // A handle that was pressed and released without moving changed nothing.
+    // Recording it anyway pushes a no-op onto the undo stack and — because
+    // history.record clears the redo stack — throws away work the user could
+    // still have got back. Only `move` used to guard this.
+    if (!state.moved) {
+      app.consumeTap();
       app.markStatic();
       app.requestRender();
       return;
     }
+    app.consumeTap();
 
     // Labels get relaid out now rather than on every frame: wrapping measures
     // text, and doing that per pointermove is the difference between a smooth

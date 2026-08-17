@@ -19,5 +19,5 @@ Korean documentation is in [`docs/`](./docs/README-KO.md).
 Bundled libraries and fonts are listed in [`THIRD_PARTY_NOTICES.md`](./THIRD_PARTY_NOTICES.md).
 
 ```bash
-npm test          # 109 tests, no browser required
+npm test          # 137 tests, no browser required
 ```

@@ -82,6 +82,10 @@ export function wrapText(source, maxWidth, measure) {
   for (const paragraph of paragraphs) {
     if (!paragraph) { out.push(""); continue; }
     if (measure(paragraph) <= maxWidth) { out.push(paragraph); continue; }
+    // Every paragraph must produce at least one line. A run of spaces wider
+    // than the box otherwise falls through every branch below and vanishes,
+    // silently shifting the rest of the label up a line.
+    const startedAt = out.length;
 
     let line = "";
     let pending = "";
@@ -120,6 +124,7 @@ export function wrapText(source, maxWidth, measure) {
       line = chunk;
     }
     flush();
+    if (out.length === startedAt) out.push("");
   }
   return out;
 }

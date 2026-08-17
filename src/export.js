@@ -60,7 +60,12 @@ export function parseExcalidrawFile(text) {
     throw new ImportError(`This drawing uses file format ${data.version}; slate reads ${FILE_VERSION}.`);
   }
   return {
-    elements: data.elements.map((element) => ({ ...element })),
+    // Tombstones are dropped on the way in, the same way they are dropped on
+    // the way out. The format permits isDeleted elements — an Excalidraw
+    // autosave is full of them — and cloneElements clears isDeleted on every
+    // copy, so importing without this filter resurrects every shape the other
+    // person had deleted.
+    elements: data.elements.filter((element) => !element?.isDeleted).map((element) => ({ ...element })),
     appState: data.appState || {},
     // Preserved verbatim. Images are not drawn in stage 1 — that is different
     // from throwing them away.

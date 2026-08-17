@@ -147,3 +147,23 @@ test("missing schemaVersion is treated as version 1", () => {
   assert.equal(readSchemaVersion({ schemaVersion: 0 }), 1);
   assert.equal(readSchemaVersion({ schemaVersion: 4 }), 4);
 });
+
+test("importing a drawing leaves the other person's deletions deleted", () => {
+  // The format permits isDeleted elements and an Excalidraw autosave is full of
+  // them. cloneElements clears isDeleted on every copy — that is what makes
+  // paste work — so without a filter at the boundary every shape the sender had
+  // deleted comes back to life in the middle of the imported drawing.
+  const json = JSON.stringify({
+    type: "excalidraw",
+    version: 2,
+    source: "https://excalidraw.com",
+    elements: [
+      { id: "keep", type: "rectangle", x: 0, y: 0, width: 10, height: 10 },
+      { id: "gone", type: "rectangle", x: 20, y: 0, width: 10, height: 10, isDeleted: true },
+    ],
+    appState: {},
+  });
+  const parsed = parseExcalidrawFile(json);
+  assert.equal(parsed.elements.length, 1, "the tombstone must not survive the import");
+  assert.equal(parsed.elements[0].id, "keep");
+});

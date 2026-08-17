@@ -106,7 +106,12 @@ export async function readElements() {
 
 /** Fresh ids and relationships rewritten to stay inside the pasted set. */
 export function materialise(elements, offset) {
-  return cloneElements(elements, offset);
+  // The payload can come from another app: copying from excalidraw.com puts a
+  // raw element array on the system clipboard, and that array keeps tombstones.
+  // cloneElements clears isDeleted on every copy — which is what makes paste
+  // work at all — so the filter has to be here, at the boundary where foreign
+  // elements arrive.
+  return cloneElements(elements.filter((element) => !element?.isDeleted), offset);
 }
 
 /** PNG/SVG onto the system clipboard, where the browser allows it. */
