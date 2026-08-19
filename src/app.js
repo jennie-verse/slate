@@ -60,6 +60,8 @@ import {
   safeFilename, maxExportScale, ImportError,
 } from "./export.js";
 import { downloadBackup, restoreBackup, BackupError, SchemaTooNewError } from "./backup.js";
+import * as journal from "./journal.js";
+import { appendJournalSettings } from "./journal-ui.js";
 
 const SAVE_DEBOUNCE = 700;
 const LAST_BOARD_KEY = "lastBoardId";
@@ -88,6 +90,7 @@ class SlateApp {
     this.editing = null;
     this.saveTimer = null;
     this.saveState = "saved";
+    this.journalContentFingerprint = null;
     this.frame = null;
 
     /* stage 2 */
@@ -169,7 +172,7 @@ class SlateApp {
     }
   }
 
-  async openBoard(id, { flush = true } = {}) {
+  async openBoard(id, { flush = true, journalOpened = false } = {}) {
     this.boardEpoch += 1;
     // Order matters. Cancel first so nothing is still writing, then flush, then
     // swap: a debounced save (or an image insert that finished while the board
@@ -197,6 +200,15 @@ class SlateApp {
       zoom: loaded.appState.zoom ?? 1,
     };
     this.background = loaded.appState.viewBackgroundColor || DEFAULT_APP_STATE.viewBackgroundColor;
+    // scene.toJSON(), not loaded.elements: the Scene sorts by order key and
+    // fills in any that are missing, so a board restored from a backup (which
+    // is written verbatim) would otherwise look "edited" on its very first save
+    // without the user touching anything.
+    this.journalContentFingerprint = this.contentFingerprint({
+      elements: this.scene.toJSON(),
+      background: this.background,
+      files: this.files,
+    });
     // gridSize is the original's appState field: a number when the grid is on,
     // null when it is off. Storing it that way keeps the round trip honest.
     this.grid = {
@@ -212,6 +224,7 @@ class SlateApp {
     this.requestRender();
     this.updateChrome();
     this.setSaveState("saved");
+    if (journalOpened) journal.recordActivity(this.board, "opened").catch(() => {});
   }
 
   registerServiceWorker() {
@@ -1357,6 +1370,27 @@ class SlateApp {
     this.saveTimer = setTimeout(() => this.saveNow(), SAVE_DEBOUNCE);
   }
 
+  /**
+   * A short digest of what is on the board, used only to tell a real edit from
+   * a viewport-only save.
+   *
+   * Two things matter here. It returns null when the journal is off — which is
+   * the default — so nobody pays for a feature they never turned on. And it
+   * keeps a digest rather than the JSON: a 2000-element freehand board is
+   * nearly 4 MB of text, and holding that for the whole session while
+   * re-comparing it on every save costs far more than the flag it produces.
+   */
+  contentFingerprint({ elements, background, files }) {
+    if (!journal.isJournalEnabled()) return null;
+    const text = JSON.stringify([elements, background, Object.keys(files || {}).sort()]);
+    let hash = 0x811c9dc5;
+    for (let i = 0; i < text.length; i += 1) {
+      hash ^= text.charCodeAt(i);
+      hash = Math.imul(hash, 0x01000193) >>> 0;
+    }
+    return `${text.length}:${hash.toString(16)}`;
+  }
+
   async saveNow({ blocking = false } = {}) {
     if (!this.board) return;
     clearTimeout(this.saveTimer);
@@ -1376,9 +1410,17 @@ class SlateApp {
       },
       files: this.files,
     };
+    const nextFingerprint = this.contentFingerprint({
+      elements: payload.elements,
+      background: payload.appState.viewBackgroundColor,
+      files: payload.files,
+    });
+    const contentChanged = this.journalContentFingerprint !== null && nextFingerprint !== this.journalContentFingerprint;
     try {
       this.board = await saveBoard(this.board, payload);
+      this.journalContentFingerprint = nextFingerprint;
       this.setSaveState("saved");
+      if (contentChanged) journal.recordActivity(this.board, "edited", { at: this.board.updatedAt }).catch(() => {});
     } catch (error) {
       // Never fail silently: a full quota or an IndexedDB error means the
       // drawing only exists in memory, and the user needs to know now.
@@ -2013,6 +2055,7 @@ class SlateApp {
     await this.saveNow();
     const meta = await createBoard(name);
     await this.openBoard(meta.id);
+    journal.recordActivity(meta, "created", { at: meta.createdAt }).catch(() => {});
     this.refreshProps();
     toast(`Created "${name}".`);
   }
@@ -2023,6 +2066,7 @@ class SlateApp {
     if (!title) return;
     this.board = await renameBoard(this.board.id, title);
     this.updateChrome();
+    journal.recordActivity(this.board, "edited", { at: this.board.updatedAt }).catch(() => {});
   }
 
   async openBoardList() {
@@ -2053,7 +2097,7 @@ class SlateApp {
           }));
           openButton.addEventListener("click", async () => {
             close();
-            await this.openBoard(board.id);
+            await this.openBoard(board.id, { journalOpened: true });
             this.refreshProps();
           });
           row.appendChild(openButton);
@@ -2241,6 +2285,7 @@ class SlateApp {
   }
 
   async doExportPNG(state) {
+    journal.recordActivity(this.board, "export-requested").catch(() => {});
     try {
       const result = await exportPNG(this.scene.visible(), {
         scale: state.scale,
@@ -2260,6 +2305,7 @@ class SlateApp {
   }
 
   async doExportSVG(state) {
+    journal.recordActivity(this.board, "export-requested").catch(() => {});
     try {
       const blob = await exportSVG(this.scene.visible(), {
         withBackground: state.background,
@@ -2280,6 +2326,7 @@ class SlateApp {
       toast("This board is empty — nothing to export.", { tone: "warn" });
       return;
     }
+    journal.recordActivity(this.board, "export-requested").catch(() => {});
     const file = toExcalidrawFile(elements, {
       viewBackgroundColor: this.background,
     }, this.files);
@@ -2466,6 +2513,8 @@ class SlateApp {
         }
         themeGroup.appendChild(themeRow);
         body.appendChild(themeGroup);
+
+        appendJournalSettings({ body, el, checkboxRow, toast, listBoards, confirmDialog });
 
         /* diagnostics */
         const info = el("div", "prop-group");

@@ -2,7 +2,7 @@
 // Settings shows APP_BUILD, so "what is deployed" and "what is running on this
 // device" can be told apart at a glance. Editing this file without bumping both
 // leaves the old build cached and the fix invisible.
-const VERSION = "2026.08.13-stage2.3";
+const VERSION = "2026.08.19-journal2-stage2.3";
 const SHELL_CACHE = `slate-shell-${VERSION}`;
 const FONT_CACHE = `slate-font-${VERSION}`;
 
@@ -55,6 +55,9 @@ const APP_SHELL = [
   "./src/search.js",
   "./src/contextmenu.js",
   "./src/tools/image.js",
+  "./src/journal.js",
+  "./src/journal-record.js",
+  "./src/journal-ui.js",
   "./icons/icon-192.png",
   "./icons/icon-512.png",
   "./icons/apple-touch-icon.png",
@@ -68,6 +71,8 @@ const OPTIONAL = [
   "./docs/README-KO.md",
   "./docs/USER-GUIDE-KO.md",
   "./docs/TROUBLESHOOTING-KO.md",
+  "../shared/v1/sync.js",
+  "../shared/v2/journal.js",
 ];
 
 self.addEventListener("install", (event) => {
@@ -98,8 +103,8 @@ self.addEventListener("message", (event) => {
 self.addEventListener("fetch", (event) => {
   const request = event.request;
   if (request.method !== "GET") return;
-  // slate never talks to another origin. Anything cross-origin is left alone
-  // rather than answered from a cache.
+  // Journal metadata can use GitHub's API after explicit opt-in. Cross-origin
+  // requests must bypass the cache so reads cannot be confused with app files.
   if (new URL(request.url).origin !== self.location.origin) return;
 
   if (request.mode === "navigate") {

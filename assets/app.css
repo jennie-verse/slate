@@ -617,6 +617,20 @@ button:disabled { cursor: default; opacity: .38; }
 .dialog-text { margin: 0; line-height: 1.55; }
 .dialog-note { margin: 0; color: var(--text-2); line-height: 1.5; }
 
+.journal-settings { gap: 10px; }
+.journal-field { display: flex; flex-direction: column; gap: 5px; }
+.journal-field input,
+.journal-range input {
+  width: 100%;
+  min-height: var(--tap);
+  padding: 0 10px;
+  border: 1.5px solid var(--line);
+  border-radius: 10px;
+  background: var(--card);
+  color: var(--text);
+}
+.journal-range { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 8px; }
+
 .dialog-actions {
   display: flex;
   gap: 8px;

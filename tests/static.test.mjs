@@ -53,8 +53,11 @@ test("optional cache entries that exist are real files", () => {
   const urls = [...block.matchAll(/"([^"]+)"/g)].map((match) => match[1]);
   for (const url of urls) {
     if (url.startsWith("./docs/")) continue;   // docs are allowed to be added later
+    if (url === "../shared/v1/sync.js" || url === "../shared/v2/journal.js") continue;
     assert.ok(existsSync(join(root, url)), `optional precache missing: ${url}`);
   }
+  assert.ok(urls.includes("../shared/v1/sync.js"));
+  assert.ok(urls.includes("../shared/v2/journal.js"));
 });
 
 test("no absolute or cross-origin asset paths", () => {
@@ -76,17 +79,18 @@ test("no external network references in shipped code", () => {
     const hits = [...text.matchAll(/https?:\/\/[^\s"')]+/g)].map((match) => match[0]);
     for (const hit of hits) {
       const allowed = hit.startsWith("http://www.w3.org/")            // SVG namespace
-        || hit.startsWith("https://jennie-verse.github.io/slate/");   // our own source id
+        || hit.startsWith("https://jennie-verse.github.io/slate/")    // our own source id
+        || hit.startsWith("https://api.github.com");                  // opt-in journal metadata
       assert.ok(allowed, `${file} references ${hit}`);
     }
   }
 });
 
-test("CSP blocks outbound connections", () => {
+test("CSP allows only the journal API as an outbound connection", () => {
   const html = read("index.html");
   const csp = html.match(/Content-Security-Policy" content="([^"]+)"/)[1];
-  assert.match(csp, /connect-src 'self'/, "connect-src must be limited to self");
-  assert.ok(!/connect-src [^;]*https:\/\//.test(csp), "no remote origin may be allowed");
+  assert.match(csp, /connect-src 'self' https:\/\/api\.github\.com;/);
+  assert.ok(!/connect-src [^;]*https:\/\/(?!api\.github\.com)/.test(csp), "no other remote origin may be allowed");
   assert.match(csp, /object-src 'none'/);
   assert.match(csp, /base-uri 'none'/);
 });
