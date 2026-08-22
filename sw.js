@@ -2,7 +2,7 @@
 // Settings shows APP_BUILD, so "what is deployed" and "what is running on this
 // device" can be told apart at a glance. Editing this file without bumping both
 // leaves the old build cached and the fix invisible.
-const VERSION = "2026.08.19-journal2-stage2.3";
+const VERSION = "2026.08.22-portable1";
 const SHELL_CACHE = `slate-shell-${VERSION}`;
 const FONT_CACHE = `slate-font-${VERSION}`;
 
@@ -19,6 +19,7 @@ const APP_SHELL = [
   "./vendor/perfect-freehand.mjs",
   "./src/app.js",
   "./src/version.js",
+  "./src/deployment.js",
   "./src/model.js",
   "./src/scene.js",
   "./src/actions.js",

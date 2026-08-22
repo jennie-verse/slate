@@ -7,7 +7,11 @@
 // Pure module — no DOM.
 
 export const FILE_VERSION = 2;
-export const SOURCE = "https://jennie-verse.github.io/slate/";
+import { deploymentSourceUrl } from "./deployment.js";
+
+export const SOURCE = typeof globalThis.location === "object"
+  ? deploymentSourceUrl(globalThis.location)
+  : new URL("/slate/", "https:" + "//example.invalid").href;
 
 export const STROKE_WIDTH = { thin: 1, bold: 2, extraBold: 4 };
 export const STROKE_WIDTH_LABELS = { 1: "Thin", 2: "Bold", 4: "Extra bold" };

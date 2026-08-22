@@ -1,11 +1,11 @@
 import { localDate, localIso, mergeBoardActivity } from "./journal-record.js";
+import { webappDataConfig } from "./deployment.js";
 
 const ENABLED_KEY = "slate.journalEnabled.v1";
 const ACTIVITY_KEY = "slate.journalActivity.v1";
 const TOKEN_KEY = "sync.token.v1";
 const CONTEXT_KEY = "slate.syncContextId";
 const CONTEXT_LABEL_KEY = "slate.syncContextLabel";
-const REPO = Object.freeze({ owner: "jennie-verse", repo: "webapp-data", branch: "main" });
 let clientPromise = null;
 let lastState = { status: "not reported", pendingCount: 0, errorCode: "" };
 
@@ -75,7 +75,7 @@ async function getClient() {
       resolveConfig: async () => {
         const token = readItem(TOKEN_KEY);
         if (!token) throw Object.assign(new Error("Journal authentication unavailable"), { code: "AUTH" });
-        return { ...REPO, token };
+        return webappDataConfig(token);
       },
       onState: state => { lastState = { ...lastState, status: state.status, pendingCount: state.pendingCount, errorCode: state.errorCode || "", lastSuccessfulWriteAt: state.lastSuccessfulWriteAt }; },
     });
@@ -140,4 +140,3 @@ export async function refreshJournalState() {
   if (client) { try { lastState.pendingCount = await client.pendingCount(); } catch { /* status only */ } }
   return getJournalState();
 }
-
