@@ -659,3 +659,9 @@ FAIL  요소 하나만 키가 없는 보드
 ### 11-6. 남은 판단
 
 `recordActivity` 는 실패해도 조용히 넘어갑니다(`.catch(() => {})`). 그림 작업을 막지 않으려는 의도로 보이며 상태는 설정 화면에 표시되므로 그대로 두었습니다.
+
+## 2026-08-26 Journal ledger backup
+
+- **Pass:** 148개 회귀 검사와 전체 syntax; Journal off ledger, exact/inferred 구분, Replace/Merge backup restore와 clear.
+- **Pass:** desktop·390×844 Menu → Settings Journal, overflow 0, console warning/error 0.
+- **Pending:** 실제 private E2E와 iPhone/iPad Home Screen drawing/touch 문맥.

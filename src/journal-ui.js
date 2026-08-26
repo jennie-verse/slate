@@ -106,8 +106,19 @@ export function appendJournalSettings({ body, el, checkboxRow, toast, listBoards
     status.textContent = result.error ? `Import paused with ${result.pendingCount || 0} pending.` : `Added ${result.records} records across ${result.dates} days.`;
   });
   group.appendChild(backfill);
+  const clearActivity = el("button", "button", { type: "button", text: "Clear captured activity" });
+  clearActivity.addEventListener("click", async () => {
+    const ok = await confirmDialog({
+      title: "Clear captured activity?",
+      message: "This clears Slate's 90-day local activity history on this device. Boards and remote Journal records are unchanged.",
+      confirmLabel: "Clear activity",
+    });
+    if (!ok) return;
+    journal.clearActivityLedger();
+    status.textContent = "Captured activity cleared on this device.";
+  });
+  group.appendChild(clearActivity);
   group.appendChild(el("p", "dialog-note", { text: "Manual history import uses createdAt and the current updatedAt only." }));
   body.appendChild(group);
   void journal.refreshJournalState().then(() => { status.textContent = statusText(); });
 }
-

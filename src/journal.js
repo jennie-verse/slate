@@ -26,6 +26,30 @@ function saveActivityMap(value) {
   writeItem(ACTIVITY_KEY, JSON.stringify(Object.fromEntries(Object.entries(value).filter(([key]) => key.slice(0, 10) >= cutoffDate))));
 }
 
+function normalizedActivityMap(rows) {
+  if (!Array.isArray(rows)) throw new Error("Invalid Slate Journal activity ledger.");
+  const next = {};
+  for (const record of rows) {
+    if (!record || record.kind !== "board-activity" || typeof record.id !== "string" || !record.data?.itemId || !Array.isArray(record.data?.actions)) {
+      throw new Error("Invalid Slate Journal activity ledger record.");
+    }
+    const date = localDate(record.at);
+    next[`${date}:${record.data.itemId}`] = record;
+  }
+  return next;
+}
+
+export function validateActivityLedger(rows) { return Object.values(normalizedActivityMap(rows)); }
+export function exportActivityLedger() { return Object.values(activityMap()); }
+export function replaceActivityLedger(rows, { merge = false } = {}) {
+  const next = normalizedActivityMap(rows);
+  saveActivityMap(merge ? { ...activityMap(), ...next } : next);
+  return exportActivityLedger();
+}
+export function clearActivityLedger() {
+  try { localStorage.removeItem(ACTIVITY_KEY); return true; } catch { return false; }
+}
+
 async function sharedV1() { return import("../../shared/v1/sync.js"); }
 
 export function isJournalEnabled() { return readItem(ENABLED_KEY) === "1"; }

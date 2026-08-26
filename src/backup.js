@@ -8,6 +8,7 @@ import { SCHEMA_VERSION, APP_BUILD } from "./version.js";
 import { exportEverything, importEverything } from "./store.js";
 import { migrate, SchemaTooNewError, readSchemaVersion } from "./migrate.js";
 import { shareOrDownload } from "./export.js";
+import { exportActivityLedger, replaceActivityLedger, validateActivityLedger } from "./journal.js";
 
 export const BACKUP_TYPE = "slate-backup";
 
@@ -22,6 +23,7 @@ export async function buildBackup() {
     boards: data.boards,
     contents: data.contents,
     settings: data.settings,
+    journalActivity: exportActivityLedger(),
   };
 }
 
@@ -44,6 +46,7 @@ export function validateBackup(payload) {
   if (!Array.isArray(payload.boards) || !Array.isArray(payload.contents)) {
     throw new BackupError("That backup is missing its boards.");
   }
+  if (payload.journalActivity !== undefined) validateActivityLedger(payload.journalActivity);
   return true;
 }
 
@@ -65,12 +68,16 @@ export async function restoreBackup(text, { replace = false, onBeforeMigrate } =
   if (found > SCHEMA_VERSION) throw new SchemaTooNewError(found, SCHEMA_VERSION);
 
   const { payload: upgraded } = await migrate(payload, onBeforeMigrate);
+  const journalActivity = upgraded.journalActivity === undefined
+    ? undefined
+    : validateActivityLedger(upgraded.journalActivity);
 
   await importEverything({
     boards: upgraded.boards || [],
     contents: upgraded.contents || [],
     settings: upgraded.settings || [],
   }, { replace });
+  if (journalActivity !== undefined) replaceActivityLedger(journalActivity, { merge: !replace });
 
   return {
     boards: (upgraded.boards || []).filter((board) => !board.deletedAt).length,

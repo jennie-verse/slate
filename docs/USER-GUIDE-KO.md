@@ -249,3 +249,9 @@ excalidraw.com과 **같은 형식**을 쓰므로 거기서 복사한 것을 여�
 - 저장 상태가 **`Not saved`** 로 빨갛게 남아 있으면 저장이 실패한 것입니다. **바로 백업을 내보내세요**
 - 그림이 어디 있는지 모르겠으면 **내용으로 돌아가기**(오른쪽 위 네모 아이콘, iPhone은 메뉴 → Scroll back to content)
 - **메뉴 → Reset this canvas** 는 그 보드의 요소를 전부 지웁니다. 확인을 거치고, 바로 Undo로 되돌릴 수 있습니다
+
+## Daybook Journal 활동 원장
+
+- Journal이 꺼져 있어도 board title과 created/opened/edited/export-requested 메타데이터만 90일 로컬 보관합니다. canvas element·text·image는 복제하지 않습니다.
+- 기존 board의 createdAt/latest updatedAt 백필은 제한된 `inferred` 이력이고, 이 버전 이후 원장 activity는 `exact`입니다.
+- JSON backup은 activity 원장을 optional 필드로 포함하며 Replace는 교체, Merge는 합칩니다. **Clear captured activity**는 board와 remote Journal record를 그대로 둡니다.

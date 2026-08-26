@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { mergeBoardActivity } from "../src/journal-record.js";
+import { validateActivityLedger } from "../src/journal.js";
 
 const board = {
   id: "fixture-board", title: "Fixture sketch", createdAt: 1786971600000,
@@ -24,6 +25,19 @@ test("projection contains stable metadata and excludes canvas content", () => {
   for (const privateText of ["must not leave", "private-element", "private-image", "elementCount", "bytes"]) {
     assert.equal(serialized.includes(privateText), false);
   }
+});
+
+test("backup activity ledger accepts only Slate metadata records", () => {
+  const record = mergeBoardActivity(null, board, "opened", "2026-08-17T09:00:00-05:00");
+  assert.deepEqual(validateActivityLedger([record]), [record]);
+  assert.throws(() => validateActivityLedger([{ ...record, kind: "file-activity" }]), /Invalid Slate Journal activity ledger/);
+});
+
+test("backup carries the ledger and restore applies replace or merge semantics", async () => {
+  const { readFile } = await import("node:fs/promises");
+  const backup = await readFile(new URL("../src/backup.js", import.meta.url), "utf8");
+  assert.match(backup, /journalActivity: exportActivityLedger\(\)/);
+  assert.match(backup, /replaceActivityLedger\(journalActivity, \{ merge: !replace \}\)/);
 });
 
 test("only content fingerprints journal edits; viewport saves and automatic opens do not", async () => {
@@ -85,4 +99,3 @@ test("all requested semantic paths are connected", async () => {
     assert.match(app, new RegExp(`recordActivity\\([^\\n]+[\"']${action}[\"']`));
   }
 });
-

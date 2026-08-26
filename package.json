@@ -4,6 +4,6 @@
   "type": "module",
   "scripts": {
     "test": "node --test tests/*.test.mjs",
-    "test:syntax": "node --check src/app.js && node --check src/deployment.js && node --check src/model.js && node --check src/scene.js && node --check src/actions.js && node --check src/geometry.js && node --check src/ordering.js && node --check src/export.js && node --check src/journal.js && node --check src/journal-record.js && node --check src/journal-ui.js && node --check sw.js"
+    "test:syntax": "node --check src/app.js && node --check src/backup.js && node --check src/deployment.js && node --check src/model.js && node --check src/scene.js && node --check src/actions.js && node --check src/geometry.js && node --check src/ordering.js && node --check src/export.js && node --check src/journal.js && node --check src/journal-record.js && node --check src/journal-ui.js && node --check sw.js"
   }
 }
