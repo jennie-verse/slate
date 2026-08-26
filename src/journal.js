@@ -21,7 +21,7 @@ function activityMap() {
 
 function saveActivityMap(value) {
   const cutoff = new Date();
-  cutoff.setDate(cutoff.getDate() - 45);
+  cutoff.setDate(cutoff.getDate() - 90);
   const cutoffDate = localDate(cutoff);
   writeItem(ACTIVITY_KEY, JSON.stringify(Object.fromEntries(Object.entries(value).filter(([key]) => key.slice(0, 10) >= cutoffDate))));
 }
@@ -103,13 +103,14 @@ export async function reportStatus(extra = {}) {
 }
 
 export async function recordActivity(board, action, { at = new Date(), importedHistory = false } = {}) {
-  if (!board?.id || !isJournalEnabled()) return false;
+  if (!board?.id) return false;
   const date = localDate(at);
   const key = `${date}:${board.id}`;
   const saved = activityMap();
   const record = mergeBoardActivity(saved[key], board, action, at, { importedHistory });
   saved[key] = record;
   saveActivityMap(saved);
+  if (!isJournalEnabled()) return false;
   const client = await getClient();
   if (!client) { lastState = { ...lastState, status: "error", errorCode: "MODULE_UNAVAILABLE" }; return false; }
   try { await client.enqueue(record, { date }); return true; }
