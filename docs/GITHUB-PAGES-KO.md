@@ -133,4 +133,4 @@ slate/
 
 ## 5. 배포 후 폴더 정리
 
-프로젝트 규칙에 따라, 배포 주소가 실제로 열리는 것을 확인한 **뒤에만** `Deliverable/slate/` 를 `Published/slate/` 로 옮깁니다. 이후 수정은 `Published/slate/` 에서 그 자리로 하고 다시 배포합니다.
+`Published/slate/`가 GitHub 저장소와 배포의 유일한 수정 원본입니다. 배포 주소와 GitHub Actions 성공을 확인한 뒤 workflow가 허용한 runtime 파일만 `Deliverable/slate/`와 `Backup/slate/`에 읽기 전용 스냅샷으로 다시 만듭니다. 폴더를 서로 이동하거나 Deliverable을 직접 수정하지 않습니다.
