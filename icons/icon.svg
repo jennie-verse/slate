@@ -1,9 +1,11 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512" role="img" aria-label="Slate">
-  <rect width="512" height="512" fill="#FBE4EA"/>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <rect width="512" height="512" fill="#FDFBF5"/>
   <g transform="translate(256 262) scale(1.2) translate(-244 -306)">
     <path d="M96 322c34-8 52-46 84-74 30-26 58-8 84 14 26 22 52 34 78 8"
-          fill="none" stroke="#8A4257" stroke-width="34" stroke-linecap="round" stroke-linejoin="round"/>
+          fill="none" stroke="#45283A" stroke-width="42" stroke-linecap="round" stroke-linejoin="round"/>
+    <path d="M96 322c34-8 52-46 84-74 30-26 58-8 84 14 26 22 52 34 78 8"
+          fill="none" stroke="#FBC9D2" stroke-width="26" stroke-linecap="round" stroke-linejoin="round"/>
     <path d="M112 372c56-14 118-16 176-6 40 7 76 6 112-8"
-          fill="none" stroke="#8A4257" stroke-width="18" stroke-linecap="round" stroke-linejoin="round" opacity=".45"/>
+          fill="none" stroke="#E3D3E8" stroke-width="22" stroke-linecap="round" stroke-linejoin="round"/>
   </g>
 </svg>
