@@ -150,7 +150,6 @@ class SlateApp {
     this.refreshProps();
     this.updateChrome();
     this.maybeShowInstallHint();
-    this.registerServiceWorker();
   }
 
   async openInitialBoard() {
@@ -225,21 +224,6 @@ class SlateApp {
     this.updateChrome();
     this.setSaveState("saved");
     if (journalOpened) journal.recordActivity(this.board, "opened").catch(() => {});
-  }
-
-  registerServiceWorker() {
-    if (!("serviceWorker" in navigator)) return;
-    // start() is async and awaits IndexedDB before reaching here, so `load` has
-    // usually ALREADY fired by now — a listener added at this point would never
-    // run and the app would silently ship with no offline support at all.
-    const register = () => {
-      navigator.serviceWorker.register("./sw.js").catch((error) => {
-        // Offline support is a bonus; the app still works without it.
-        console.warn("[slate] service worker registration failed:", error?.message || error);
-      });
-    };
-    if (document.readyState === "complete") register();
-    else window.addEventListener("load", register, { once: true });
   }
 
   /* ---------------------------------------------------------------- canvas */

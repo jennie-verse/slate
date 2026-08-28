@@ -2,12 +2,12 @@
 // Settings shows APP_BUILD, so "what is deployed" and "what is running on this
 // device" can be told apart at a glance. Editing this file without bumping both
 // leaves the old build cached and the fix invisible.
-const VERSION = "2026.08.27-iconpalette1";
+const VERSION = "2026.08.27-cache-recovery3";
 const SHELL_CACHE = `slate-shell-${VERSION}`;
 const FONT_CACHE = `slate-font-${VERSION}`;
 
-// Must be present for the app to run at all. addAll() is deliberate: a missing
-// file should fail the install loudly rather than activate a half-cached shell.
+// Must be present for the app to run at all. Fetch with cache:"reload" so a
+// corrupt HTTP cache cannot repopulate a new shell with mixed module versions.
 const APP_SHELL = [
   "./",
   "./index.html",
@@ -18,6 +18,7 @@ const APP_SHELL = [
   "./vendor/rough.esm.js",
   "./vendor/perfect-freehand.mjs",
   "./src/app.js",
+  "./src/sw-register.js",
   "./src/version.js",
   "./src/deployment.js",
   "./src/model.js",
@@ -79,9 +80,18 @@ const OPTIONAL = [
 self.addEventListener("install", (event) => {
   event.waitUntil((async () => {
     const shell = await caches.open(SHELL_CACHE);
-    await shell.addAll(APP_SHELL);
+    const shellFiles = await Promise.all(APP_SHELL.map(async (url) => {
+      const request = new Request(url, { cache: "reload" });
+      const response = await fetch(request);
+      if (!response.ok) throw new Error(`Could not cache ${url}: ${response.status}`);
+      return [request, response];
+    }));
+    await Promise.all(shellFiles.map(([request, response]) => shell.put(request, response)));
     const fonts = await caches.open(FONT_CACHE);
     await Promise.all(OPTIONAL.map((url) => fonts.add(url).catch(() => null)));
+    // The shell was cached atomically above, so activate immediately. A broken
+    // old module graph cannot post SKIP_WAITING from app code.
+    await self.skipWaiting();
   })());
 });
 

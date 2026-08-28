@@ -145,15 +145,23 @@ test("touch targets stay 44px", () => {
   assert.match(css, /\.tool\s*\{[^}]*min-height:\s*48px/s);
 });
 
-test("service worker registration survives a late start()", () => {
-  // start() awaits IndexedDB, so `load` has normally already fired by the time
-  // registerServiceWorker() runs. Gating registration purely on a `load`
-  // listener silently ships the app with no offline support at all — it was
-  // shipped that way once and the browser check caught it.
-  const app = read("src/app.js");
-  const body = app.match(/registerServiceWorker\(\)\s*\{[\s\S]*?\n  \}/)[0];
-  assert.match(body, /document\.readyState === "complete"/, "must register immediately when the page has already loaded");
-  assert.match(body, /serviceWorker\.register\("\.\/sw\.js"\)/);
+test("service worker registration survives app-module startup failure", () => {
+  // A stale cache can serve mismatched module generations. Registration must
+  // run from a classic script before app.js imports, or the broken module graph
+  // prevents the new worker from ever installing and the blank screen persists.
+  const html = read("index.html");
+  assert.ok(
+    html.indexOf('./src/sw-register.js?v=2026.08.27-cache-recovery3') < html.indexOf('./src/app.js'),
+    "register the worker before loading the app module",
+  );
+  const register = read("src/sw-register.js");
+  assert.match(register, /document\.readyState === "complete"/, "must register immediately when the page already loaded");
+  assert.match(register, /\.register\("\.\/sw\.js", \{ updateViaCache: "none" \}\)/);
+  assert.match(register, /registration\.update\(\)/, "request an update even when a registration already exists");
+  const worker = read("sw.js");
+  const install = worker.match(/self\.addEventListener\("install"[\s\S]*?\n\}\);/)[0];
+  assert.match(install, /new Request\(url, \{ cache: "reload" \}\)/, "shell refresh must bypass the HTTP cache");
+  assert.match(install, /await self\.skipWaiting\(\)/, "a broken app cannot message a waiting worker");
 });
 
 test("a sync that follows history.run() must merge, not stack", () => {
