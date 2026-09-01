@@ -18,6 +18,9 @@ alignment, snapping, images, search, links and a shape library.
 Korean documentation is in [`docs/`](./docs/README-KO.md).
 Bundled libraries and fonts are listed in [`THIRD_PARTY_NOTICES.md`](./THIRD_PARTY_NOTICES.md).
 
+When Journal is enabled, visible board usage is recorded as start/end time and
+active minutes. The 90-day session ledger travels with Slate backups.
+
 ```bash
 npm test          # 137 tests, no browser required
 ```

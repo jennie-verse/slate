@@ -62,6 +62,7 @@ import {
 import { downloadBackup, restoreBackup, BackupError, SchemaTooNewError } from "./backup.js";
 import * as journal from "./journal.js";
 import { appendJournalSettings } from "./journal-ui.js";
+import { createSessionTracker } from "./activity-session.js";
 
 const SAVE_DEBOUNCE = 700;
 const LAST_BOARD_KEY = "lastBoardId";
@@ -92,6 +93,10 @@ class SlateApp {
     this.saveState = "saved";
     this.journalContentFingerprint = null;
     this.frame = null;
+    this.usageSessions = createSessionTracker({
+      kind: "usage-session", itemType: "drawing-board", storageKey: "slate.journalSessions.v1",
+      onRecord: (record) => journal.recordSession(record),
+    });
 
     /* stage 2 */
     this.snapGuides = null;
@@ -122,6 +127,9 @@ class SlateApp {
 
     this.renderer = new Renderer(this.dom.canvasHost);
     this.input = new InputManager(this, this.dom.surface);
+    this.dom.surface.addEventListener("pointerdown", () => this.usageSessions.signal(), { passive: true });
+    this.dom.surface.addEventListener("wheel", () => this.usageSessions.signal(), { passive: true });
+    this.dom.surface.addEventListener("keydown", () => this.usageSessions.signal());
     // An image finishing its decode is the one thing that changes the picture
     // without any action from the user — repaint when it lands.
     onImageReady(() => {
@@ -139,9 +147,10 @@ class SlateApp {
     });
 
     // iOS can discard the tab without warning — force a final write on the way out.
-    window.addEventListener("pagehide", () => this.saveNow({ blocking: true }));
+    window.addEventListener("pagehide", () => { this.usageSessions.stop(); this.saveNow({ blocking: true }); });
     document.addEventListener("visibilitychange", () => {
-      if (document.visibilityState === "hidden") this.saveNow({ blocking: true });
+      if (document.visibilityState === "hidden") { this.usageSessions.stop(); this.saveNow({ blocking: true }); }
+      else if (this.board) this.usageSessions.start({ id: this.board.id, title: this.board.title || "Untitled", itemType: "drawing-board" });
     });
 
     this.fitCanvas();
@@ -172,6 +181,7 @@ class SlateApp {
   }
 
   async openBoard(id, { flush = true, journalOpened = false } = {}) {
+    this.usageSessions.stop();
     this.boardEpoch += 1;
     // Order matters. Cancel first so nothing is still writing, then flush, then
     // swap: a debounced save (or an image insert that finished while the board
@@ -224,6 +234,7 @@ class SlateApp {
     this.updateChrome();
     this.setSaveState("saved");
     if (journalOpened) journal.recordActivity(this.board, "opened").catch(() => {});
+    this.usageSessions.start({ id: this.board.id, title: this.board.title || "Untitled", itemType: "drawing-board" });
   }
 
   /* ---------------------------------------------------------------- canvas */

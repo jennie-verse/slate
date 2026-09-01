@@ -1,5 +1,6 @@
 import { localDate, localIso, mergeBoardActivity } from "./journal-record.js";
 import { webappDataConfig } from "./deployment.js";
+import { createSessionLedger } from "./activity-session.js";
 
 const ENABLED_KEY = "slate.journalEnabled.v1";
 const ACTIVITY_KEY = "slate.journalActivity.v1";
@@ -8,6 +9,7 @@ const CONTEXT_KEY = "slate.syncContextId";
 const CONTEXT_LABEL_KEY = "slate.syncContextLabel";
 let clientPromise = null;
 let lastState = { status: "not reported", pendingCount: 0, errorCode: "" };
+const sessionLedger = createSessionLedger("slate.journalSessions.v1");
 
 function readItem(key) { try { return localStorage.getItem(key) || ""; } catch { return ""; } }
 function writeItem(key, value) { try { localStorage.setItem(key, value); return true; } catch { return false; } }
@@ -48,6 +50,20 @@ export function replaceActivityLedger(rows, { merge = false } = {}) {
 }
 export function clearActivityLedger() {
   try { localStorage.removeItem(ACTIVITY_KEY); return true; } catch { return false; }
+}
+export const exportSessionLedger = () => sessionLedger.read();
+export const validateSessionLedger = (rows) => sessionLedger.validate(rows);
+export const replaceSessionLedger = (rows, options = {}) => sessionLedger.replace(rows, options);
+export async function recordSession(record) {
+  if (!record?.id || record.kind !== "usage-session") return false;
+  sessionLedger.replace([record], { merge: true });
+  if (!isJournalEnabled()) return false;
+  const client = await getClient(); if (!client) return false;
+  try {
+    const module = await import("../../shared/v2/journal.js");
+    if (!module.JOURNAL_KINDS?.slate?.includes("usage-session")) { lastState = { ...lastState, status: "error", errorCode: "CONTRACT_STALE" }; return false; }
+    await client.enqueue(record, { date: record.at.slice(0, 10) }); return true;
+  } catch { return false; }
 }
 
 async function sharedV1() { return import("../../shared/v1/sync.js"); }
@@ -155,6 +171,7 @@ export async function backfillJournal(boards, { from, to }) {
   const dates = new Set(projected.map(record => localDate(record.at)));
   await reportStatus({ backfill: { status: "running", from, to, processedDates: 0, totalDates: dates.size, updatedAt: localIso() } });
   for (const record of projected) await client.enqueue(record, { date: localDate(record.at) });
+  for (const record of sessionLedger.read().filter((row) => row.at.slice(0, 10) >= from && row.at.slice(0, 10) <= to)) await client.enqueue(record, { date: row.at.slice(0, 10) });
   const result = await client.flush();
   await reportStatus({ backfill: { status: result.error ? "partial" : "complete", from, to, processedDates: result.error ? 0 : dates.size, totalDates: dates.size, updatedAt: localIso() } });
   return { ...result, records: projected.length, dates: dates.size };

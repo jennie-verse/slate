@@ -151,7 +151,7 @@ test("service worker registration survives app-module startup failure", () => {
   // prevents the new worker from ever installing and the blank screen persists.
   const html = read("index.html");
   assert.ok(
-    html.indexOf('./src/sw-register.js?v=2026.08.27-cache-recovery3') < html.indexOf('./src/app.js'),
+    html.indexOf('./src/sw-register.js?v=2026.09.01-journal-session1') < html.indexOf('./src/app.js'),
     "register the worker before loading the app module",
   );
   const register = read("src/sw-register.js");

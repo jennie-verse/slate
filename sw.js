@@ -2,7 +2,7 @@
 // Settings shows APP_BUILD, so "what is deployed" and "what is running on this
 // device" can be told apart at a glance. Editing this file without bumping both
 // leaves the old build cached and the fix invisible.
-const VERSION = "2026.08.27-cache-recovery3";
+const VERSION = "2026.09.01-journal-session1";
 const SHELL_CACHE = `slate-shell-${VERSION}`;
 const FONT_CACHE = `slate-font-${VERSION}`;
 
@@ -59,6 +59,7 @@ const APP_SHELL = [
   "./src/tools/image.js",
   "./src/journal.js",
   "./src/journal-record.js",
+  "./src/activity-session.js",
   "./src/journal-ui.js",
   "./icons/icon-192.png",
   "./icons/icon-512.png",
