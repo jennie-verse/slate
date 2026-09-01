@@ -255,3 +255,9 @@ excalidraw.com과 **같은 형식**을 쓰므로 거기서 복사한 것을 여�
 - Journal이 꺼져 있어도 board title과 created/opened/edited/export-requested 메타데이터만 90일 로컬 보관합니다. canvas element·text·image는 복제하지 않습니다.
 - 기존 board의 createdAt/latest updatedAt 백필은 제한된 `inferred` 이력이고, 이 버전 이후 원장 activity는 `exact`입니다.
 - JSON backup은 activity 원장을 optional 필드로 포함하며 Replace는 교체, Merge는 합칩니다. **Clear captured activity**는 board와 remote Journal record를 그대로 둡니다.
+
+---
+
+## 2026-09-01 업데이트 — 보드 사용 세션 재개 버그 수정
+
+보드를 열어 두고 5분 넘게 손을 떼었다가(idle) 다시 그리거나 조작하면, 이전에는 그 보드의 사용 시간이 더 기록되지 않는 버그가 있었습니다. 이번 업데이트로 idle 이후 다시 활동하면 새 사용 세션이 정상적으로 시작되어 Daybook에 반영됩니다. 보드를 전환할 때만 세션이 완전히 종료됩니다. 텍스트 라벨을 입력하는 동안에도 세션이 끊기지 않도록 입력 감지 범위를 넓혔습니다.

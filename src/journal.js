@@ -171,7 +171,7 @@ export async function backfillJournal(boards, { from, to }) {
   const dates = new Set(projected.map(record => localDate(record.at)));
   await reportStatus({ backfill: { status: "running", from, to, processedDates: 0, totalDates: dates.size, updatedAt: localIso() } });
   for (const record of projected) await client.enqueue(record, { date: localDate(record.at) });
-  for (const record of sessionLedger.read().filter((row) => row.at.slice(0, 10) >= from && row.at.slice(0, 10) <= to)) await client.enqueue(record, { date: row.at.slice(0, 10) });
+  for (const record of sessionLedger.read().filter((row) => row.at.slice(0, 10) >= from && row.at.slice(0, 10) <= to)) await client.enqueue(record, { date: record.at.slice(0, 10) });
   const result = await client.flush();
   await reportStatus({ backfill: { status: result.error ? "partial" : "complete", from, to, processedDates: result.error ? 0 : dates.size, totalDates: dates.size, updatedAt: localIso() } });
   return { ...result, records: projected.length, dates: dates.size };

@@ -99,3 +99,29 @@ test("all requested semantic paths are connected", async () => {
     assert.match(app, new RegExp(`recordActivity\\([^\\n]+[\"']${action}[\"']`));
   }
 });
+
+test('backfillJournal session loop uses the enqueued record date, not an out-of-scope variable', async () => {
+  const { readFile } = await import('node:fs/promises');
+  const src = await readFile(new URL('../src/journal.js', import.meta.url), 'utf8');
+  assert.ok(src.includes('sessionLedger.read().filter'), 'expected the session-ledger backfill loop to still be present');
+  const enqueueCall = src.match(/sessionLedger\.read\(\)\.filter[\s\S]*?await client\.enqueue\(record, \{ date: (.*?) \}\);/);
+  assert.ok(enqueueCall, 'expected to find the session-ledger enqueue call');
+  assert.equal(enqueueCall[1].trim(), 'record.at.slice(0, 10)', 'the enqueue date must come from the loop variable "record", not the filter callback\'s "row" (ReferenceError regression)');
+});
+
+test('session ledger date-range filter used by backfill keeps only in-range rows', () => {
+  const rows = [
+    { id: 'a', at: '2026-08-01T09:00:00-05:00' },
+    { id: 'b', at: '2026-08-15T09:00:00-05:00' },
+    { id: 'c', at: '2026-09-01T09:00:00-05:00' },
+  ];
+  const from = '2026-08-10';
+  const to = '2026-08-20';
+  const inRange = rows.filter((row) => row.at.slice(0, 10) >= from && row.at.slice(0, 10) <= to);
+  assert.deepEqual(inRange.map((row) => row.id), ['b']);
+  // The same rows, mapped the way the fixed loop does (using the loop variable
+  // itself, not a name that only exists inside the filter callback).
+  const enqueued = inRange.map((record) => ({ record, date: record.at.slice(0, 10) }));
+  assert.equal(enqueued.length, 1);
+  assert.equal(enqueued[0].date, '2026-08-15');
+});

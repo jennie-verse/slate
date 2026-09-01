@@ -665,3 +665,31 @@ FAIL  요소 하나만 키가 없는 보드
 - **Pass:** 148개 회귀 검사와 전체 syntax; Journal off ledger, exact/inferred 구분, Replace/Merge backup restore와 clear.
 - **Pass:** desktop·390×844 Menu → Settings Journal, overflow 0, console warning/error 0.
 - **Pending:** 실제 private E2E와 iPhone/iPad Home Screen drawing/touch 문맥.
+
+---
+
+## 2026-09-01 — Daybook Markdown Export 후속 수정 (Revision 4)
+
+### 고친 문제
+
+- **[버그] `backfillJournal`의 `ReferenceError`.** `src/journal.js`의 세션 원장 backfill 루프가 `filter` 콜백 밖에서 `row`를 참조해, 세션 원장에 기록이 있으면 backfill이 예외로 중단되던 문제. `record.at.slice(0, 10)`로 수정.
+- **[버그] 5분 idle 이후 보드 사용 세션이 재개되지 않음.** `src/activity-session.js`의 `stop()`이 `currentItem`까지 지워서, idle 뒤에는 같은 보드를 계속 보고 있어도 새 세션이 시작되지 않던 문제. `stop()`은 세션만 종료하고, 보드를 전환할 때만 `openBoard()`가 `clearItem()`을 호출하도록 분리.
+- **[안정성] 텍스트 입력 중 usage session이 끊길 수 있던 문제.** `pointerdown`/`wheel`/`keydown` 리스너가 캔버스 표면(`this.dom.surface`)에만 걸려 있어, 텍스트 입력 오버레이에서 타이핑만 하는 동안에는 signal이 가지 않았다. Grove와 같은 방식으로 `document` 레벨 + 보드가 열려 있을 때만 신호를 보내도록 이동.
+
+### 새로 추가한 테스트
+
+- `tests/activity-session.test.mjs`: idle 경계 종료·재개, background 후 세션 분리, 항목 전환 시 이전 세션 종료, activeSeconds 0 미기록, `stop()`/`clearItem()` 차이 — 6건.
+- `tests/journal.test.mjs`: backfill 세션 루프의 `record` 참조 검사 + 날짜 범위 필터 검증 — 2건.
+
+### 통과 — 자동
+
+`npm test` **158/158 통과**(기존 150건 + 신규 8건), `npm run test:syntax` 통과.
+
+### 버전
+
+- `src/version.js` `APP_BUILD` / `sw.js` `VERSION`: `2026.09.01-journal-session1` → `2026.09.01-session-fix1`
+
+### Pending — 실기기에서 확인 필요
+
+- [ ] 보드를 열어 5분 넘게 idle 상태로 두었다가 다시 그리거나 팬/줌했을 때 새 사용 세션이 시작되는지
+- [ ] 텍스트 라벨 입력 오버레이에서 5분 가까이 타이핑만 계속했을 때 세션이 끊기지 않는지

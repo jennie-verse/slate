@@ -125,11 +125,14 @@ export function createSessionTracker({
     accrue(at);
     const finished = { ...state, endedAt: Math.min(at, state.lastSignalAt + idleMs) };
     state = null;
-    currentItem = null;
     removeStorage(activeKey);
     if (timer) clearInterval(timer);
     timer = null;
     return publish(finished);
+  };
+  const clearItem = (at = now()) => {
+    if (state) stop(at);
+    currentItem = null;
   };
   const heartbeat = () => {
     if (!state) return;
@@ -173,6 +176,6 @@ export function createSessionTracker({
     return publish({ ...saved, endedAt: end });
   };
   recover();
-  return { start, signal, stop, heartbeat, exportSessions: ledger.read, validateSessions: ledger.validate, replaceSessions: ledger.replace, active: () => Boolean(state) };
+  return { start, signal, stop, clearItem, heartbeat, exportSessions: ledger.read, validateSessions: ledger.validate, replaceSessions: ledger.replace, active: () => Boolean(state) };
 }
 
