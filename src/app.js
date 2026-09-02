@@ -2519,7 +2519,7 @@ class SlateApp {
         const info = el("div", "prop-group");
         info.appendChild(el("div", "prop-label", { text: "About" }));
         // Showing the build makes "deployed" versus "running here" answerable.
-        info.appendChild(el("p", "dialog-note", { text: `Build ${APP_BUILD}` }));
+        info.appendChild(el("p", "dialog-note", { text: `App version ${APP_BUILD}` }));
         info.appendChild(el("p", "dialog-note", {
           text: isStandalone()
             ? "Running from the Home Screen."
