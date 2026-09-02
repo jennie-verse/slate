@@ -2390,8 +2390,9 @@ class SlateApp {
       const text = await file.text();
       const replace = await confirmDialog({
         title: "Restore backup",
-        message: "Replace everything on this device with the backup? Choose Cancel to merge the backup in instead, keeping your current boards.",
+        message: "Replace everything on this device with the backup, or merge it into your current boards?",
         confirmLabel: "Replace all",
+        cancelLabel: "Merge instead",
         danger: true,
       });
       try {

@@ -154,14 +154,14 @@ export function anyDialogOpen() {
  * Confirmation. Every destructive path in the app goes through here, and the
  * ones that can be undone say so on the button.
  */
-export function confirmDialog({ title, message, confirmLabel = "OK", danger = false }) {
+export function confirmDialog({ title, message, confirmLabel = "OK", cancelLabel = "Cancel", danger = false }) {
   return new Promise((resolve) => {
     openDialog({
       title,
       build: (body, close) => {
         body.appendChild(el("p", "dialog-text", { text: message }));
         const row = el("div", "dialog-actions");
-        const cancel = el("button", "button", { type: "button", text: "Cancel" });
+        const cancel = el("button", "button", { type: "button", text: cancelLabel });
         const confirm = el("button", `button button-primary${danger ? " button-danger" : ""}`, {
           type: "button", text: confirmLabel,
         });
