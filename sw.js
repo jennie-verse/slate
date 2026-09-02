@@ -2,7 +2,7 @@
 // Settings shows APP_BUILD, so "what is deployed" and "what is running on this
 // device" can be told apart at a glance. Editing this file without bumping both
 // leaves the old build cached and the fix invisible.
-const VERSION = "2026.09.02-devicename1";
+const VERSION = "2026.09.02-swcachefix1";
 const SHELL_CACHE = `slate-shell-${VERSION}`;
 const FONT_CACHE = `slate-font-${VERSION}`;
 
@@ -89,7 +89,9 @@ self.addEventListener("install", (event) => {
     }));
     await Promise.all(shellFiles.map(([request, response]) => shell.put(request, response)));
     const fonts = await caches.open(FONT_CACHE);
-    await Promise.all(OPTIONAL.map((url) => fonts.add(url).catch(() => null)));
+    await Promise.all(OPTIONAL.map((url) => fetch(new Request(url, { cache: "reload" }))
+      .then((response) => (response.ok ? fonts.put(url, response) : null))
+      .catch(() => null)));
     // The shell was cached atomically above, so activate immediately. A broken
     // old module graph cannot post SKIP_WAITING from app code.
     await self.skipWaiting();
