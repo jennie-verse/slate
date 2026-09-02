@@ -30,7 +30,7 @@ export function appendJournalSettings({ body, el, checkboxRow, toast, listBoards
 
   const deviceLabel = el("label", "journal-field");
   deviceLabel.appendChild(el("span", "dialog-note", { text: "Device name" }));
-  const deviceInput = el("input", null, { type: "text", value: journal.contextLabel(), placeholder: "e.g. iPad", "aria-label": "Journal device name" });
+  const deviceInput = el("input", null, { type: "text", value: journal.contextLabel(), placeholder: "iphone-home", "aria-label": "Journal device name" });
   deviceLabel.appendChild(deviceInput);
   group.appendChild(deviceLabel);
 
