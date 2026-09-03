@@ -646,6 +646,8 @@ button:disabled { cursor: default; opacity: .38; }
 }
 
 .button {
+  display: inline-flex;
+  align-items: center;
   min-height: var(--tap);
   padding: 0 16px;
   border: 1.5px solid var(--line);
