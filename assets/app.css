@@ -190,16 +190,18 @@ button:disabled { cursor: default; opacity: .38; }
 .topbar-spacer { flex: 1 1 auto; pointer-events: none; min-width: 0; }
 
 .chip {
+  position: relative;
   display: flex;
   align-items: center;
   gap: 2px;
-  min-height: var(--tap);
-  padding: 0 4px;
+  min-height: 30px;
+  padding: 6px 4px;
   border: 1px solid var(--line);
   border-radius: var(--radius);
   background: var(--card);
   box-shadow: var(--shadow);
 }
+.chip::after { content: ""; position: absolute; inset: -7px -2px; }
 
 .chip-group { padding: 0 2px; }
 
