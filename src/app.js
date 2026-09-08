@@ -91,6 +91,8 @@ class SlateApp {
     this.files = {};
     this.editing = null;
     this.saveTimer = null;
+    this.savePromise = null;
+    this.saveGeneration = 0;
     this.saveState = "saved";
     this.journalContentFingerprint = null;
     this.frame = null;
@@ -186,7 +188,6 @@ class SlateApp {
   }
 
   async openBoard(id, { flush = true, journalOpened = false } = {}) {
-    this.usageSessions.clearItem();
     this.boardEpoch += 1;
     // Order matters. Cancel first so nothing is still writing, then flush, then
     // swap: a debounced save (or an image insert that finished while the board
@@ -197,7 +198,8 @@ class SlateApp {
     // to the board being left, and it has to be committed before the flush, not
     // after the swap.
     if (this.editing) this.commitText();
-    if (flush && this.board) await this.saveNow({ blocking: true });
+    if (flush && this.board && !await this.saveNow({ blocking: true })) return false;
+    this.usageSessions.clearItem();
     const loaded = await loadBoard(id);
     if (!loaded) return;
     this.board = loaded.meta;
@@ -1365,6 +1367,7 @@ class SlateApp {
   scheduleSave() {
     if (!this.board) return;
     this.setSaveState("dirty");
+    this.saveGeneration += 1;
     clearTimeout(this.saveTimer);
     // Debounced so nothing is written mid-stroke.
     this.saveTimer = setTimeout(() => this.saveNow(), SAVE_DEBOUNCE);
@@ -1391,14 +1394,8 @@ class SlateApp {
     return `${text.length}:${hash.toString(16)}`;
   }
 
-  async saveNow({ blocking = false } = {}) {
-    if (!this.board) return;
-    clearTimeout(this.saveTimer);
-    if (!blocking) this.setSaveState("saving");
-    // Images whose element is gone for good would otherwise stay in storage
-    // for ever. Tombstoned elements still count as users, so undo still works.
-    this.pruneFiles();
-    const payload = {
+  boardContent() {
+    return {
       elements: this.scene.toJSON(),
       appState: {
         scrollX: this.viewport.scrollX,
@@ -1410,24 +1407,46 @@ class SlateApp {
       },
       files: this.files,
     };
-    const nextFingerprint = this.contentFingerprint({
-      elements: payload.elements,
-      background: payload.appState.viewBackgroundColor,
-      files: payload.files,
-    });
-    const contentChanged = this.journalContentFingerprint !== null && nextFingerprint !== this.journalContentFingerprint;
-    try {
-      this.board = await saveBoard(this.board, payload);
-      this.journalContentFingerprint = nextFingerprint;
-      this.setSaveState("saved");
-      if (contentChanged) journal.recordActivity(this.board, "edited", { at: this.board.updatedAt }).catch(() => {});
-    } catch (error) {
-      // Never fail silently: a full quota or an IndexedDB error means the
-      // drawing only exists in memory, and the user needs to know now.
-      this.setSaveState("error");
-      toast("Could not save. Export a backup now — Menu → Backup.", { tone: "error", timeout: 10000 });
-      console.warn("[slate] save failed:", error?.message || error);
-    }
+  }
+
+  async saveNow({ blocking = false } = {}) {
+    if (!this.board) return true;
+    if (this.editing) this.commitText();
+    clearTimeout(this.saveTimer);
+    if (this.savePromise) return this.savePromise;
+    if (!blocking) this.setSaveState("saving");
+    this.savePromise = (async () => {
+      try {
+        let generation;
+        do {
+          generation = this.saveGeneration;
+          // Tombstoned image elements still count as users, so Undo keeps working.
+          this.pruneFiles();
+          const payload = this.boardContent();
+          const nextFingerprint = this.contentFingerprint({
+            elements: payload.elements,
+            background: payload.appState.viewBackgroundColor,
+            files: payload.files,
+          });
+          const contentChanged = this.journalContentFingerprint !== null && nextFingerprint !== this.journalContentFingerprint;
+          this.board = await saveBoard(this.board, payload);
+          this.journalContentFingerprint = nextFingerprint;
+          if (contentChanged) journal.recordActivity(this.board, "edited", { at: this.board.updatedAt }).catch(() => {});
+          // A second edit during the write needs its own snapshot. All callers
+          // await this same queue, including board changes and background saves.
+        } while (generation !== this.saveGeneration);
+        this.setSaveState("saved");
+        return true;
+      } catch (error) {
+        this.setSaveState("error");
+        toast("Could not save. Keep this board open and use Menu → Backup all boards.", { tone: "error", timeout: 10000 });
+        console.warn("[slate] save failed:", error?.message || error);
+        return false;
+      } finally {
+        this.savePromise = null;
+      }
+    })();
+    return this.savePromise;
   }
 
   /* -------------------------------------------------------------- search */
@@ -2052,7 +2071,7 @@ class SlateApp {
     const title = await promptDialog({ title: "New board", label: "Board name", value: "Untitled", confirmLabel: "Create" });
     if (title === null) return;
     const name = title.trim() || "Untitled";
-    await this.saveNow();
+    if (!await this.saveNow()) return;
     const meta = await createBoard(name);
     await this.openBoard(meta.id);
     journal.recordActivity(meta, "created", { at: meta.createdAt }).catch(() => {});
@@ -2073,7 +2092,7 @@ class SlateApp {
     // Before saveNow, not after: a live drag would otherwise be written to disk
     // at an arbitrary mid-drag point, with no undo entry left to take it back.
     this.cancelGesture();
-    await this.saveNow();
+    if (!await this.saveNow()) return;
     const boards = await listBoards();
     const estimate = await storageEstimate();
     openDialog({
@@ -2378,7 +2397,11 @@ class SlateApp {
   async doBackup() {
     try {
       await this.saveNow();
-      const result = await downloadBackup();
+      // Overlay the live board even when local storage is full: a recovery
+      // backup must contain what the user can currently see.
+      const result = await downloadBackup({
+        currentBoard: this.board ? { meta: this.board, content: this.boardContent() } : null,
+      });
       toast(`Backup ready — ${result.boards} board${result.boards === 1 ? "" : "s"} (${result.filename}).`, { timeout: 6000 });
     } catch (error) {
       toast(error.message || "Backup failed.", { tone: "error", timeout: 7000 });
@@ -2398,6 +2421,8 @@ class SlateApp {
         danger: true,
       });
       try {
+        this.cancelGesture();
+        if (!await this.saveNow()) return;
         const result = await restoreBackup(text, {
           replace,
           onBeforeMigrate: async () => {
@@ -2407,7 +2432,9 @@ class SlateApp {
         });
         toast(`Restored ${result.boards} board${result.boards === 1 ? "" : "s"}.`);
         const boards = await listBoards();
-        if (boards.length) await this.openBoard(boards[0].id);
+        // The restore already wrote the replacement. Flushing the old scene
+        // here would overwrite it again when the backup contains the same ID.
+        if (boards.length) await this.openBoard(boards[0].id, { flush: false });
         this.refreshProps();
       } catch (error) {
         const message = error instanceof SchemaTooNewError || error instanceof BackupError

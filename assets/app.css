@@ -204,6 +204,8 @@ button:disabled { cursor: default; opacity: .38; }
 .chip::after { content: ""; position: absolute; inset: -7px -2px; }
 
 .chip-group { padding: 0 2px; }
+/* The group is a container: its hit-area overlay must not cover Undo/Zoom. */
+.chip-group::after { content: none; }
 
 .icon-button {
   display: inline-flex;

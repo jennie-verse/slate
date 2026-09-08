@@ -5,15 +5,26 @@
 // written by a newer build instead of half-reading it (migrate.js).
 
 import { SCHEMA_VERSION, APP_BUILD } from "./version.js";
-import { exportEverything, importEverything } from "./store.js";
+import { exportEverything, importEverything, estimateBytes } from "./store.js";
 import { migrate, SchemaTooNewError, readSchemaVersion } from "./migrate.js";
 import { shareOrDownload } from "./export.js";
 import { exportActivityLedger, replaceActivityLedger, validateActivityLedger, exportSessionLedger, replaceSessionLedger, validateSessionLedger } from "./journal.js";
 
 export const BACKUP_TYPE = "slate-backup";
 
-export async function buildBackup() {
+export async function buildBackup({ currentBoard = null } = {}) {
   const data = await exportEverything();
+  if (currentBoard?.meta?.id && currentBoard.content) {
+    const id = currentBoard.meta.id;
+    const content = { ...currentBoard.content, id };
+    const meta = {
+      ...currentBoard.meta,
+      elementCount: content.elements.filter((element) => !element.isDeleted).length,
+      bytes: estimateBytes(content),
+    };
+    data.boards = [...data.boards.filter((board) => board.id !== id), meta];
+    data.contents = [...data.contents.filter((row) => row.id !== id), content];
+  }
   return {
     app: "slate",
     type: BACKUP_TYPE,
@@ -28,8 +39,8 @@ export async function buildBackup() {
   };
 }
 
-export async function downloadBackup() {
-  const payload = await buildBackup();
+export async function downloadBackup(options) {
+  const payload = await buildBackup(options);
   const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
   const filename = `slate-backup-${new Date().toISOString().slice(0, 10)}.json`;
   const result = await shareOrDownload(blob, filename);
