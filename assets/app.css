@@ -110,6 +110,10 @@ body {
 }
 
 button, input, textarea, select { font-family: inherit; }
+
+/* No double-tap delay or double-tap zoom on controls (pinch is untouched; the
+   canvas surfaces keep their own touch-action: none). */
+button, input, label, summary, a { touch-action: manipulation; }
 button, select { font-size: var(--fs); color: inherit; }
 
 /* House rule, no exceptions: an input under 16px makes iOS zoom the page. */
@@ -464,6 +468,13 @@ button:disabled { cursor: default; opacity: .38; }
   .topbar { gap: 4px; }
 }
 
+/* Unfolded but upright (iPhone Duo portrait, ~700-900px wide): the property
+   sheet would otherwise stretch edge to edge. Cap and centre it. The rail and
+   landscape rules below set left:auto, which makes this auto margin 0 there. */
+@media (min-width: 700px) {
+  .panel { width: min(560px, calc(100% - var(--safe-l) - var(--safe-r) - 16px)); margin-inline: auto; }
+}
+
 /* ------------------------------------------------------- rail (iPad wide) */
 
 /* Rail layout swaps ONE class' worth of positioning. There is no second DOM
@@ -534,6 +545,14 @@ button:disabled { cursor: default; opacity: .38; }
   .panel-collapsed .panel-handle svg { transform: rotate(180deg); }
 
   .board-title { max-width: 26vw; }
+}
+
+/* Mouse / trackpad only (Mac): hover for rows that have none. Nothing depends
+   on hover; touch devices never match this. */
+@media (hover: hover) and (pointer: fine) {
+  .board-row:hover:not(.is-current),
+  .library-row:hover { background: var(--rose-tint); }
+  .toolbar { scrollbar-color: var(--rose) transparent; }
 }
 
 /* --------------------------------------------------------- text editor */

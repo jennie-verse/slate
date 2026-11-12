@@ -1,6 +1,6 @@
 # slate — 무한 캔버스 그리기 앱
 
-iPad와 iPhone에서 Apple Pencil이나 손가락으로 도형·화살표·글씨를 자유롭게 배치하는 개인용 무한 캔버스입니다. 기기 안에 저장되고, 인터넷 없이 동작하며, 그린 것은 어디로도 나가지 않습니다.
+iPhone(접이식 iPhone Duo 포함)·iPad·Mac에서 Apple Pencil이나 손가락으로 도형·화살표·글씨를 자유롭게 배치하는 개인용 무한 캔버스입니다. 기기 안에 저장되고, 인터넷 없이 동작하며, 그린 것은 어디로도 나가지 않습니다.
 
 배포 주소: `https://jennie-verse.github.io/slate/`
 
