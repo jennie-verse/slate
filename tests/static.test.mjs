@@ -151,7 +151,7 @@ test("service worker registration survives app-module startup failure", () => {
   // prevents the new worker from ever installing and the blank screen persists.
   const html = read("index.html");
   assert.ok(
-    html.indexOf('./src/sw-register.js?v=2026.11.12-foldable1') < html.indexOf('./src/app.js'),
+    html.indexOf('./src/sw-register.js?v=2026.11.12-foldable2') < html.indexOf('./src/app.js'),
     "register the worker before loading the app module",
   );
   const register = read("src/sw-register.js");
@@ -388,10 +388,12 @@ test("a label is never added to a host that is already gone", () => {
 test("foldable/Mac layout rules exist and the version stamps agree", () => {
   const css = read("assets/app.css");
   assert.match(css, /touch-action: manipulation/);
-  assert.match(css, /@media \(min-width: 700px\)\s*\{\s*\.panel \{ width: min\(560px/);
+  assert.match(css, /@media \(min-width: 640px\) and \(min-height: 560px\)\s*\{\s*\.panel \{ width: min\(560px/);
+  assert.ok(css.includes("(min-width: 640px) and (min-height: 560px)"), "tier A query text");
+  assert.match(css, /@media \(min-width: 820px\) and \(min-height: 620px\) and \(orientation: landscape\)/, "tier B rail rules stay");
   assert.match(css, /@media \(hover: hover\) and \(pointer: fine\)/);
   assert.match(css, /--fs-input:\s*16px/);
   const stamp = read("src/version.js").match(/APP_BUILD = "([^"]+)"/)[1];
-  assert.equal(stamp, "2026.11.12-foldable1");
+  assert.equal(stamp, "2026.11.12-foldable2");
   assert.ok(read("index.html").includes(`sw-register.js?v=${stamp}`), "index.html query must carry the build stamp");
 });

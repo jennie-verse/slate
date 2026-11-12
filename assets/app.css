@@ -468,10 +468,10 @@ button:disabled { cursor: default; opacity: .38; }
   .topbar { gap: 4px; }
 }
 
-/* Unfolded but upright (iPhone Duo portrait, ~700-900px wide): the property
+/* Unfolded but upright (iPhone Duo portrait, 669x951; tier A): the property
    sheet would otherwise stretch edge to edge. Cap and centre it. The rail and
    landscape rules below set left:auto, which makes this auto margin 0 there. */
-@media (min-width: 700px) {
+@media (min-width: 640px) and (min-height: 560px) {
   .panel { width: min(560px, calc(100% - var(--safe-l) - var(--safe-r) - 16px)); margin-inline: auto; }
 }
 
@@ -601,11 +601,12 @@ button:disabled { cursor: default; opacity: .38; }
   align-items: flex-end;
   justify-content: center;
   padding: 12px;
+  padding-top: calc(12px + var(--safe-t));
   padding-bottom: calc(12px + var(--safe-b) + var(--keyboard-inset));
   background: rgba(28, 23, 26, .34);
 }
 
-@media (min-width: 700px) {
+@media (min-width: 640px) and (min-height: 560px) {
   .backdrop { align-items: center; }
 }
 
