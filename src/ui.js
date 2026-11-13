@@ -173,7 +173,10 @@ export function confirmDialog({ title, message, confirmLabel = "OK", cancelLabel
         row.appendChild(confirm);
         body.appendChild(row);
       },
-      onClose: () => resolve(false),
+      // Dismissal (Escape, backdrop, close button) is null, not false: callers that
+      // treat the Cancel button as a real choice (restore: "Merge instead") must
+      // be able to tell "I closed it" from "I chose the cancel button".
+      onClose: () => resolve(null),
     });
   });
 }

@@ -151,7 +151,7 @@ test("service worker registration survives app-module startup failure", () => {
   // prevents the new worker from ever installing and the blank screen persists.
   const html = read("index.html");
   assert.ok(
-    html.indexOf('./src/sw-register.js?v=2026.11.12-foldable3') < html.indexOf('./src/app.js'),
+    html.indexOf('./src/sw-register.js?v=2026.11.12-foldable4') < html.indexOf('./src/app.js'),
     "register the worker before loading the app module",
   );
   const register = read("src/sw-register.js");
@@ -394,7 +394,7 @@ test("foldable/Mac layout rules exist and the version stamps agree", () => {
   assert.match(css, /@media \(hover: hover\) and \(pointer: fine\)/);
   assert.match(css, /--fs-input:\s*16px/);
   const stamp = read("src/version.js").match(/APP_BUILD = "([^"]+)"/)[1];
-  assert.equal(stamp, "2026.11.12-foldable3");
+  assert.equal(stamp, "2026.11.12-foldable4");
   assert.ok(read("index.html").includes(`sw-register.js?v=${stamp}`), "index.html query must carry the build stamp");
 });
 
@@ -402,7 +402,20 @@ test("unfolded landscape rail fits eleven tools at 951x669", () => {
   const css = read("assets/app.css");
   assert.match(
     css,
-    /@media \(min-width: 820px\) and \(min-height: 620px\) and \(max-height: 699px\) and \(orientation: landscape\)\s*\{\s*\.toolbar \{ gap: 0; \}\s*\.toolbar \.tool \{ min-height: var\(--tap\); \}/,
+    /@media \(min-width: 820px\) and \(min-height: 620px\) and \(max-height: 699px\) and \(orientation: landscape\)\s*\{\s*\.toolbar \{ gap: 0; max-height: calc\(100vh - 120px - var\(--safe-t\) - var\(--safe-b\)\); \}\s*\.toolbar \.tool \{ min-height: var\(--tap\); \}/,
     "rail tightens below 700px height so the Eraser is not cut off",
   );
+});
+
+test("restore: closing the dialog aborts instead of merging", () => {
+  const app = read("src/app.js");
+  assert.match(app, /if \(replace === null\) return;/);
+});
+
+test("rail, property panel and dialogs respect the safe-area insets", () => {
+  const css = read("assets/app.css");
+  assert.match(css, /top: calc\(50% \+ \(var\(--safe-t\) - var\(--safe-b\)\) \/ 2\);/, "rail centres between the insets");
+  assert.match(css, /max-height: calc\(100vh - 140px - var\(--safe-t\) - var\(--safe-b\)\);/);
+  assert.match(css, /max-height: calc\(100vh - var\(--safe-t\) - var\(--safe-b\) - 96px\);/, "wide panel stays above the bottom inset");
+  assert.match(css, /max-height: min\(78vh, 640px, calc\(100vh - var\(--safe-t\) - var\(--safe-b\) - var\(--keyboard-inset\) - 24px\)\);/, "dialog fits between insets");
 });

@@ -2420,6 +2420,8 @@ class SlateApp {
         cancelLabel: "Merge instead",
         danger: true,
       });
+      // Closing the dialog (Escape, backdrop, X) is not "Merge instead".
+      if (replace === null) return;
       try {
         this.cancelGesture();
         if (!await this.saveNow()) return;
