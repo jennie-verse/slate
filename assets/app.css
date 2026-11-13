@@ -547,6 +547,14 @@ button:disabled { cursor: default; opacity: .38; }
   .board-title { max-width: 26vw; }
 }
 
+/* Unfolded landscape (951x669): eleven 48px tools need 556px, the rail may use
+   529px, so the Eraser was cut off. Tighten the rail only where it cannot fit;
+   targets stay at the 44px minimum. */
+@media (min-width: 820px) and (min-height: 620px) and (max-height: 699px) and (orientation: landscape) {
+  .toolbar { gap: 0; }
+  .toolbar .tool { min-height: var(--tap); }
+}
+
 /* Mouse / trackpad only (Mac): hover for rows that have none. Nothing depends
    on hover; touch devices never match this. */
 @media (hover: hover) and (pointer: fine) {

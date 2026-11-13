@@ -165,8 +165,10 @@ export function confirmDialog({ title, message, confirmLabel = "OK", cancelLabel
         const confirm = el("button", `button button-primary${danger ? " button-danger" : ""}`, {
           type: "button", text: confirmLabel,
         });
-        cancel.addEventListener("click", () => { close(); resolve(false); });
-        confirm.addEventListener("click", () => { close(); resolve(true); });
+        // resolve BEFORE close(): close() runs onClose, which resolves false, and a
+        // promise settles only once — closing first made every confirm answer "no".
+        cancel.addEventListener("click", () => { resolve(false); close(); });
+        confirm.addEventListener("click", () => { resolve(true); close(); });
         row.appendChild(cancel);
         row.appendChild(confirm);
         body.appendChild(row);

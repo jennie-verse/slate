@@ -151,7 +151,7 @@ test("service worker registration survives app-module startup failure", () => {
   // prevents the new worker from ever installing and the blank screen persists.
   const html = read("index.html");
   assert.ok(
-    html.indexOf('./src/sw-register.js?v=2026.11.12-foldable2') < html.indexOf('./src/app.js'),
+    html.indexOf('./src/sw-register.js?v=2026.11.12-foldable3') < html.indexOf('./src/app.js'),
     "register the worker before loading the app module",
   );
   const register = read("src/sw-register.js");
@@ -394,6 +394,15 @@ test("foldable/Mac layout rules exist and the version stamps agree", () => {
   assert.match(css, /@media \(hover: hover\) and \(pointer: fine\)/);
   assert.match(css, /--fs-input:\s*16px/);
   const stamp = read("src/version.js").match(/APP_BUILD = "([^"]+)"/)[1];
-  assert.equal(stamp, "2026.11.12-foldable2");
+  assert.equal(stamp, "2026.11.12-foldable3");
   assert.ok(read("index.html").includes(`sw-register.js?v=${stamp}`), "index.html query must carry the build stamp");
+});
+
+test("unfolded landscape rail fits eleven tools at 951x669", () => {
+  const css = read("assets/app.css");
+  assert.match(
+    css,
+    /@media \(min-width: 820px\) and \(min-height: 620px\) and \(max-height: 699px\) and \(orientation: landscape\)\s*\{\s*\.toolbar \{ gap: 0; \}\s*\.toolbar \.tool \{ min-height: var\(--tap\); \}/,
+    "rail tightens below 700px height so the Eraser is not cut off",
+  );
 });
